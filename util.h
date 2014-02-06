@@ -25,8 +25,13 @@
 		return (errno == ETIMEDOUT);
 	}
 #elif defined WIN32
+
+//# include <windows.h>
+# include <winsock2.h>
+# include <ws2tcpip.h>
+	// commented out: gives build error under mingw32
 	//#include <ws2tcpip.h>
-	#include <winsock2.h>
+	//#include <winsock2.h>
 
 	#define SOCKETTYPE SOCKET
 	#define SOCKETFAIL(a) ((int)(a) == SOCKET_ERROR)
@@ -52,6 +57,24 @@
 	#ifndef in_addr_t
 	#define in_addr_t uint32_t
 	#endif
+
+/*
+typedef int socklen_t;
+
+struct addrinfo {
+    int              ai_flags;
+    int              ai_family;
+    int              ai_socktype;
+    int              ai_protocol;
+    socklen_t        ai_addrlen;
+    struct sockaddr *ai_addr;
+    char            *ai_canonname;
+    struct addrinfo *ai_next;
+};
+*/
+
+
+
 #endif
 
 #if JANSSON_MAJOR_VERSION >= 2

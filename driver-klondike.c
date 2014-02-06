@@ -22,7 +22,9 @@
 #include "config.h"
 
 #ifdef WIN32
+# include <winsock2.h>
 #include <windows.h>
+# include <ws2tcpip.h>
 #endif
 
 #include "compat.h"

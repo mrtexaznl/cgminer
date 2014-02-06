@@ -39,7 +39,11 @@
 #ifndef WIN32
 #include <sys/resource.h>
 #else
+
+# include <winsock2.h>
 #include <windows.h>
+# include <ws2tcpip.h>
+
 #endif
 #include <ccan/opt/opt.h>
 #include <jansson.h>
@@ -4995,6 +4999,24 @@ static void thread_reportout(struct thr_info *thr)
 	thr->cgpu->status = LIFE_WELL;
 	thr->cgpu->device_last_well = time(NULL);
 }
+
+#ifdef WIN32
+long long
+llround (double x)
+{
+/* Add +/- 0.5, then round towards zero. */
+double tmp = trunc (x + (x >= 0.0 ? 0.5 : -0.5));
+if (!isfinite (tmp)
+|| tmp > (double)LONG_LONG_MAX
+|| tmp < (double)LONG_LONG_MIN)
+{
+errno = ERANGE;
+/* Undefined behaviour, so we could return anything. */
+/* return tmp > 0.0 ? LONG_LONG_MAX : LONG_LONG_MIN; */
+}
+return (long long)tmp;
+}
+#endif
 
 static void hashmeter(int thr_id, struct timeval *diff,
 		      uint64_t hashes_done)
