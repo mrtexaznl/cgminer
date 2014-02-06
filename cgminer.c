@@ -339,11 +339,11 @@ struct schedtime schedstart;
 struct schedtime schedstop;
 bool sched_paused;
 
-bool opt_debug_console = true;
+//bool opt_debug_console = true;
 
 static void debugWork(const struct work * const work)
 {
-	if (!opt_debug_console)
+	if (!opt_debug)
 	return;
 
 	//const int thr_id = work->thr_id;
