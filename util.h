@@ -25,7 +25,7 @@
 		return (errno == ETIMEDOUT);
 	}
 #elif defined WIN32
-	#include <ws2tcpip.h>
+	//#include <ws2tcpip.h>
 	#include <winsock2.h>
 
 	#define SOCKETTYPE SOCKET
