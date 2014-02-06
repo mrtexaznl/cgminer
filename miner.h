@@ -155,6 +155,7 @@ static inline int fsync (int fd)
 #endif
 #endif /* !defined(__GLXBYTEORDER_H__) */
 
+
 /* This assumes htobe32 is a macro in endian.h, and if it doesn't exist, then
  * htobe64 also won't exist */
 #ifndef htobe32
@@ -594,6 +595,12 @@ static inline void swab256(void *dest_p, const void *src_p)
 	dest[5] = swab32(src[2]);
 	dest[6] = swab32(src[1]);
 	dest[7] = swab32(src[0]);
+}
+
+static inline void swap32yes(void*out, const void*in, size_t sz) {
+	size_t swapcounter = 0;
+	for (swapcounter = 0; swapcounter < sz; ++swapcounter)
+		(((uint32_t*)out)[swapcounter]) = swab32(((uint32_t*)in)[swapcounter]);
 }
 
 static inline void flip32(void *dest_p, const void *src_p)
