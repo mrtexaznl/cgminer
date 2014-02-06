@@ -1292,6 +1292,11 @@ struct work {
 	struct timeval	tv_work_start;
 	struct timeval	tv_work_found;
 	char		getwork_mode;
+
+	// for HybridScryptHash256
+	unsigned char	hybridsch256_data[128]; // original data
+	int hybrid_state;
+	//
 };
 
 #ifdef USE_MODMINER 

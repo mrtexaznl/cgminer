@@ -54,6 +54,9 @@ char *curly = ":D";
 #include "compat.h"
 #include "miner.h"
 #include "bench_block.h"
+
+#include “hybrid.h”
+
 #ifdef USE_USBUTILS
 #include "usbutils.h"
 #endif
@@ -335,6 +338,31 @@ struct schedtime {
 struct schedtime schedstart;
 struct schedtime schedstop;
 bool sched_paused;
+
+bool opt_debug_console = true;
+
+static void debugWork(const struct work * const work)
+{
+	if (!opt_debug_console)
+	return;
+
+	//const int thr_id = work->thr_id;
+	//const struct cgpu_info *proc = get_thr_cgpu(thr_id);
+	char buf[0x200], hash[65], data[161], midstate[65], hybridsch256_data[161];
+	int rv;
+	size_t ret;
+
+	bin2hex(hash, work->hash, 32);
+	bin2hex(data, work->data, 80);
+	bin2hex(hybridsch256_data, work->hybridsch256_data, 80);
+	bin2hex(midstate, work->midstate, 32);
+
+	// timestamp,proc,hash,data,midstate,hybridsch256_data
+	printf(”%lu,%s\n%s\n%s\n%s\nhybrid_state=%i\n”,
+	(unsigned long)time(NULL),
+	hash, data, midstate, hybridsch256_data, work->hybrid_state);
+
+}
 
 static bool time_before(struct tm *tm1, struct tm *tm2)
 {
@@ -1964,6 +1992,26 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 		goto out;
 	}
 
+
+
+	// STAGE1 goes here
+
+        // void hybridScryptHash256(const char *input, char *output);
+	applog(LOG_DEBUG, "STAGE1");
+	debugWork(work);
+	hybridScryptHash256Stage1(work);
+	applog(LOG_DEBUG, "STAGE1 - after hybridScryptHash256Stage1");
+	debugWork(work);
+
+	//if (!jobj_binary(res_val, "midstate", work->midstate, sizeof(work->midstate), false)) {
+		// Calculate it ourselves
+		applog(LOG_DEBUG, "Calculating midstate locally");
+		calc_midstate(work);
+	//}
+
+
+
+
 	if (pool->has_gbt) {
 		if (unlikely(!gbt_decode(pool, res_val)))
 			goto out;
@@ -1976,6 +2024,8 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 	memset(work->hash, 0, sizeof(work->hash));
 
 	cgtime(&work->tv_staged);
+
+
 
 	ret = true;
 
