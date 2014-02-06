@@ -1,5 +1,5 @@
-#ifndef SCRYPT_H
-#define SCRYPT_H
+#ifndef HYBRID_H
+#define HYBRID_H
 
 #ifdef __cplusplus
 extern "C" {
