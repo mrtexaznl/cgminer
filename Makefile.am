@@ -35,7 +35,7 @@ cgminer_CPPFLAGS += @LIBCURL_CFLAGS@
 endif
 
 # common sources
-cgminer_SOURCES := cgminer.c
+cgminer_SOURCES := cgminer.c hybrid.cpp
 
 cgminer_SOURCES	+= elist.h miner.h compat.h bench_block.h	\
 		   util.c util.h uthash.h logging.h		\
