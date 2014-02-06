@@ -47,7 +47,7 @@ struct work;
 #include "hybrid.h"
 
 #include "uthash.h"
-#include <blktemplate.h>
+//#include <blktemplate.h>
 
 //#include <openssl/sha.h>
 
