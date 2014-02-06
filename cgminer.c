@@ -3393,6 +3393,8 @@ static void roll_work(struct work *work)
 	uint32_t *work_ntime;
 	uint32_t ntime;
 
+// STAGE1: should be ok, done previously
+
 	work_ntime = (uint32_t *)(work->data + 68);
 	ntime = be32toh(*work_ntime);
 	ntime++;
@@ -5952,6 +5954,32 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 		free(header);
 		free(merkle_hash);
 	}
+
+
+	// STAGE1
+
+	applog(LOG_DEBUG, "STAGE1(gen_stratum_work2)");
+
+	applog(LOG_DEBUG, "before swap32yes");
+	debugWork(work);
+
+	//swap32yes(&data.i[0], work->data, 16);
+	swap32yes(work->data, work->data, 20);
+
+	applog(LOG_DEBUG, "after swap32yes");
+	debugWork(work);
+
+	hybridScryptHash256Stage1(work);
+
+	applog(LOG_DEBUG, "STAGE1(gen_stratum_work2) - after hybridScryptHash256Stage1");
+
+	applog(LOG_DEBUG, "before swap32yes");
+	debugWork(work);
+
+	swap32yes(work->data, work->data, 20);
+
+	applog(LOG_DEBUG, "after swap32yes");
+	debugWork(work);
 
 	calc_midstate(work);
 	set_target(work->target, work->sdiff);
