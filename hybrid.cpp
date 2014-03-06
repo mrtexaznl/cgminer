@@ -105,7 +105,7 @@ struct work {
 	int		gbt_txns;
 
 	unsigned int	work_block;
-	int		id;
+	uint32_t	id;
 	UT_hash_handle	hh;
 
 	double		work_difficulty;
