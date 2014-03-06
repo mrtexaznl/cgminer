@@ -617,7 +617,6 @@ char *bin2hex(const unsigned char *p, size_t len)
 	return s;
 }
 
-/* Does the reverse of bin2hex but does not allocate any ram */
 static const int hex2bin_tbl[256] = {
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -636,6 +635,8 @@ static const int hex2bin_tbl[256] = {
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 };
+
+/* Does the reverse of bin2hex but does not allocate any ram */
 bool hex2bin(unsigned char *p, const char *hexstr, size_t len)
 {
 	int nibble1, nibble2;
@@ -1259,11 +1260,14 @@ static enum send_ret __stratum_send(struct pool *pool, char *s, ssize_t len)
 		struct timeval timeout = {1, 0};
 		ssize_t sent;
 		fd_set wd;
-
+retry:
 		FD_ZERO(&wd);
 		FD_SET(sock, &wd);
-		if (select(sock + 1, NULL, &wd, NULL, &timeout) < 1)
+		if (select(sock + 1, NULL, &wd, NULL, &timeout) < 1) {
+			if (interrupted())
+				goto retry;
 			return SEND_SELECTFAIL;
+		}
 #ifdef __APPLE__
 		sent = send(pool->sock, s + ssent, len, SO_NOSIGPIPE);
 #elif WIN32
@@ -1494,8 +1498,8 @@ static bool parse_notify(struct pool *pool, json_t *val)
 {
 	char *job_id, *prev_hash, *coinbase1, *coinbase2, *bbversion, *nbit,
 	     *ntime, *header;
+	unsigned char *cb1 = NULL, *cb2 = NULL;
 	size_t cb1_len, cb2_len, alloc_len;
-	unsigned char *cb1, *cb2;
 	bool clean, ret = false;
 	int merkles, i;
 	json_t *arr;
@@ -1562,8 +1566,12 @@ static bool parse_notify(struct pool *pool, json_t *val)
 			pool->swork.merkle_bin[i] = malloc(32);
 			if (unlikely(!pool->swork.merkle_bin[i]))
 				quit(1, "Failed to malloc pool swork merkle_bin");
-			hex2bin(pool->swork.merkle_bin[i], merkle, 32);
+			ret = hex2bin(pool->swork.merkle_bin[i], merkle, 32);
 			free(merkle);
+			if (unlikely(!ret)) {
+				applog(LOG_ERR, "Failed to convert merkle to merkle_bin in parse_notify");
+				goto out_unlock;
+			}
 		}
 	}
 	pool->swork.merkles = merkles;
@@ -1590,17 +1598,24 @@ static bool parse_notify(struct pool *pool, json_t *val)
 		pool->swork.nbit,
 		"00000000", /* nonce */
 		workpadding);
-	if (unlikely(!hex2bin(pool->header_bin, header, 128)))
-		quit(1, "Failed to convert header to header_bin in parse_notify");
+	ret = hex2bin(pool->header_bin, header, 128);
+	if (unlikely(!ret)) {
+		applog(LOG_ERR, "Failed to convert header to header_bin in parse_notify");
+		goto out_unlock;
+	}
 
-	cb1 = calloc(cb1_len, 1);
-	if (unlikely(!cb1))
-		quithere(1, "Failed to calloc cb1 in parse_notify");
-	hex2bin(cb1, coinbase1, cb1_len);
-	cb2 = calloc(cb2_len, 1);
-	if (unlikely(!cb2))
-		quithere(1, "Failed to calloc cb2 in parse_notify");
-	hex2bin(cb2, coinbase2, cb2_len);
+	cb1 = alloca(cb1_len);
+	ret = hex2bin(cb1, coinbase1, cb1_len);
+	if (unlikely(!ret)) {
+		applog(LOG_ERR, "Failed to convert cb1 to cb1_bin in parse_notify");
+		goto out_unlock;
+	}
+	cb2 = alloca(cb2_len);
+	ret = hex2bin(cb2, coinbase2, cb2_len);
+	if (unlikely(!ret)) {
+		applog(LOG_ERR, "Failed to convert cb2 to cb2_bin in parse_notify");
+		goto out_unlock;
+	}
 	free(pool->coinbase);
 	align_len(&alloc_len);
 	pool->coinbase = calloc(alloc_len, 1);
@@ -1609,6 +1624,7 @@ static bool parse_notify(struct pool *pool, json_t *val)
 	memcpy(pool->coinbase, cb1, cb1_len);
 	memcpy(pool->coinbase + cb1_len, pool->nonce1bin, pool->n1_len);
 	memcpy(pool->coinbase + cb1_len + pool->n1_len + pool->n2size, cb2, cb2_len);
+out_unlock:
 	cg_wunlock(&pool->data_lock);
 
 	if (opt_protocol) {
@@ -1623,13 +1639,10 @@ static bool parse_notify(struct pool *pool, json_t *val)
 	}
 	free(coinbase1);
 	free(coinbase2);
-	free(cb1);
-	free(cb2);
 
 	/* A notify message is the closest stratum gets to a getwork */
 	pool->getwork_requested++;
 	total_getworks++;
-	ret = true;
 	if (pool == current_pool())
 		opt_work_update = true;
 out:
@@ -1656,7 +1669,7 @@ static bool parse_diff(struct pool *pool, json_t *val)
 			applog(LOG_NOTICE, "Pool %d difficulty changed to %d",
 			       pool->pool_no, idiff);
 		else
-			applog(LOG_NOTICE, "Pool %d difficulty changed to %f",
+			applog(LOG_NOTICE, "Pool %d difficulty changed to %.1f",
 			       pool->pool_no, diff);
 	} else
 		applog(LOG_DEBUG, "Pool %d difficulty set to %f", pool->pool_no,
@@ -1665,8 +1678,18 @@ static bool parse_diff(struct pool *pool, json_t *val)
 	return true;
 }
 
+static void __suspend_stratum(struct pool *pool)
+{
+	clear_sockbuf(pool);
+	pool->stratum_active = pool->stratum_notify = false;
+	if (pool->sock)
+		CLOSESOCKET(pool->sock);
+	pool->sock = 0;
+}
+
 static bool parse_reconnect(struct pool *pool, json_t *val)
 {
+	char *sockaddr_url, *stratum_port, *tmp;
 	char *url, *port, address[256];
 
 	memset(address, 0, 255);
@@ -1680,12 +1703,23 @@ static bool parse_reconnect(struct pool *pool, json_t *val)
 
 	sprintf(address, "%s:%s", url, port);
 
-	if (!extract_sockaddr(address, &pool->sockaddr_url, &pool->stratum_port))
+	if (!extract_sockaddr(address, &sockaddr_url, &stratum_port))
 		return false;
 
-	pool->stratum_url = pool->sockaddr_url;
-
 	applog(LOG_NOTICE, "Reconnect requested from pool %d to %s", pool->pool_no, address);
+
+	clear_pool_work(pool);
+
+	mutex_lock(&pool->stratum_lock);
+	__suspend_stratum(pool);
+	tmp = pool->sockaddr_url;
+	pool->sockaddr_url = sockaddr_url;
+	pool->stratum_url = pool->sockaddr_url;
+	free(tmp);
+	tmp = pool->stratum_port;
+	pool->stratum_port = stratum_port;
+	free(tmp);
+	mutex_unlock(&pool->stratum_lock);
 
 	if (!restart_stratum(pool))
 		return false;
@@ -1729,19 +1763,17 @@ bool parse_method(struct pool *pool, char *s)
 	char *buf;
 
 	if (!s)
-		return ret;
+		goto out;
 
 	val = JSON_LOADS(s, &err);
 	if (!val) {
 		applog(LOG_INFO, "JSON decode failed(%d): %s", err.line, err.text);
-		return ret;
+		goto out;
 	}
 
 	method = json_object_get(val, "method");
-	if (!method) {
-		json_decref(val);
-		return ret;
-	}
+	if (!method)
+		goto out_decref;
 	err_val = json_object_get(val, "error");
 	params = json_object_get(val, "params");
 
@@ -1754,52 +1786,44 @@ bool parse_method(struct pool *pool, char *s)
 			ss = strdup("(unknown reason)");
 
 		applog(LOG_INFO, "JSON-RPC method decode failed: %s", ss);
-
-		json_decref(val);
 		free(ss);
-
-		return ret;
+		goto out_decref;
 	}
 
 	buf = (char *)json_string_value(method);
-	if (!buf) {
-		json_decref(val);
-		return ret;
-	}
+	if (!buf)
+		goto out_decref;
 
 	if (!strncasecmp(buf, "mining.notify", 13)) {
 		if (parse_notify(pool, params))
 			pool->stratum_notify = ret = true;
 		else
 			pool->stratum_notify = ret = false;
-		json_decref(val);
-		return ret;
+		goto out_decref;
 	}
 
-	if (!strncasecmp(buf, "mining.set_difficulty", 21) && parse_diff(pool, params)) {
-		ret = true;
-		json_decref(val);
-		return ret;
+	if (!strncasecmp(buf, "mining.set_difficulty", 21)) {
+		ret = parse_diff(pool, params);
+		goto out_decref;
 	}
 
-	if (!strncasecmp(buf, "client.reconnect", 16) && parse_reconnect(pool, params)) {
-		ret = true;
-		json_decref(val);
-		return ret;
+	if (!strncasecmp(buf, "client.reconnect", 16)) {
+		ret = parse_reconnect(pool, params);
+		goto out_decref;
 	}
 
-	if (!strncasecmp(buf, "client.get_version", 18) && send_version(pool, val)) {
-		ret = true;
-		json_decref(val);
-		return ret;
+	if (!strncasecmp(buf, "client.get_version", 18)) {
+		ret =  send_version(pool, val);
+		goto out_decref;
 	}
 
-	if (!strncasecmp(buf, "client.show_message", 19) && show_message(pool, params)) {
-		ret = true;
-		json_decref(val);
-		return ret;
+	if (!strncasecmp(buf, "client.show_message", 19)) {
+		ret = show_message(pool, params);
+		goto out_decref;
 	}
+out_decref:
 	json_decref(val);
+out:
 	return ret;
 }
 
@@ -2156,6 +2180,7 @@ static bool setup_stratum_socket(struct pool *pool)
 				applog(LOG_DEBUG, "Failed sock connect");
 				continue;
 			}
+retry:
 			FD_ZERO(&rw);
 			FD_SET(sockd, &rw);
 			selret = select(sockd + 1, NULL, &rw, NULL, &tv_timeout);
@@ -2171,6 +2196,8 @@ static bool setup_stratum_socket(struct pool *pool)
 					break;
 				}
 			}
+			if (selret < 0 && interrupted())
+				goto retry;
 			CLOSESOCKET(sockd);
 			applog(LOG_DEBUG, "Select timeout/failed connect");
 			continue;
@@ -2261,14 +2288,10 @@ out:
 
 void suspend_stratum(struct pool *pool)
 {
-	clear_sockbuf(pool);
 	applog(LOG_INFO, "Closing socket for stratum pool %d", pool->pool_no);
 
 	mutex_lock(&pool->stratum_lock);
-	pool->stratum_active = pool->stratum_notify = false;
-	if (pool->sock)
-		CLOSESOCKET(pool->sock);
-	pool->sock = 0;
+	__suspend_stratum(pool);
 	mutex_unlock(&pool->stratum_lock);
 }
 
@@ -2516,16 +2539,19 @@ void *str_text(char *ptr)
 
 void RenameThread(const char* name)
 {
+	char buf[16];
+
+	snprintf(buf, sizeof(buf), "cg@%s", name);
 #if defined(PR_SET_NAME)
 	// Only the first 15 characters are used (16 - NUL terminator)
-	prctl(PR_SET_NAME, name, 0, 0, 0);
+	prctl(PR_SET_NAME, buf, 0, 0, 0);
 #elif (defined(__FreeBSD__) || defined(__OpenBSD__))
-	pthread_set_name_np(pthread_self(), name);
+	pthread_set_name_np(pthread_self(), buf);
 #elif defined(MAC_OSX)
-	pthread_setname_np(name);
+	pthread_setname_np(buf);
 #else
-	// Prevent warnings for unused parameters...
-	(void)name;
+	// Prevent warnings
+	(void)buf;
 #endif
 }
 
@@ -2556,19 +2582,24 @@ void _cgsem_post(cgsem_t *cgsem, const char *file, const char *func, const int l
 	const char buf = 1;
 	int ret;
 
+retry:
 	ret = write(cgsem->pipefd[1], &buf, 1);
 	if (unlikely(ret == 0))
 		applog(LOG_WARNING, "Failed to write errno=%d" IN_FMT_FFL, errno, file, func, line);
+	else if (unlikely(ret < 0 && interrupted))
+		goto retry;
 }
 
 void _cgsem_wait(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	char buf;
 	int ret;
-
+retry:
 	ret = read(cgsem->pipefd[0], &buf, 1);
 	if (unlikely(ret == 0))
 		applog(LOG_WARNING, "Failed to read errno=%d" IN_FMT_FFL, errno, file, func, line);
+	else if (unlikely(ret < 0 && interrupted))
+		goto retry;
 }
 
 void cgsem_destroy(cgsem_t *cgsem)
@@ -2585,6 +2616,7 @@ int _cgsem_mswait(cgsem_t *cgsem, int ms, const char *file, const char *func, co
 	fd_set rd;
 	char buf;
 
+retry:
 	fd = cgsem->pipefd[0];
 	FD_ZERO(&rd);
 	FD_SET(fd, &rd);
@@ -2597,6 +2629,8 @@ int _cgsem_mswait(cgsem_t *cgsem, int ms, const char *file, const char *func, co
 	}
 	if (likely(!ret))
 		return ETIMEDOUT;
+	if (interrupted())
+		goto retry;
 	quitfrom(1, file, func, line, "Failed to sem_timedwait errno=%d cgsem=0x%p", errno, cgsem);
 	/* We don't reach here */
 	return 0;
@@ -2618,6 +2652,8 @@ void cgsem_reset(cgsem_t *cgsem)
 		ret = select(fd + 1, &rd, NULL, NULL, &timeout);
 		if (ret > 0)
 			ret = read(fd, &buf, 1);
+		else if (unlikely(ret < 0 && interrupted()))
+			ret = 1;
 	} while (ret > 0);
 }
 #else
@@ -2636,8 +2672,12 @@ void _cgsem_post(cgsem_t *cgsem, const char *file, const char *func, const int l
 
 void _cgsem_wait(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
-	if (unlikely(sem_wait(cgsem)))
+retry:
+	if (unlikely(sem_wait(cgsem))) {
+		if (interrupted())
+			goto retry;
 		quitfrom(1, file, func, line, "Failed to sem_wait errno=%d cgsem=0x%p", errno, cgsem);
+	}
 }
 
 int _cgsem_mswait(cgsem_t *cgsem, int ms, const char *file, const char *func, const int line)
@@ -2649,12 +2689,15 @@ int _cgsem_mswait(cgsem_t *cgsem, int ms, const char *file, const char *func, co
 	cgtime(&tv_now);
 	timeval_to_spec(&ts_now, &tv_now);
 	ms_to_timespec(&abs_timeout, ms);
+retry:
 	timeraddspec(&abs_timeout, &ts_now);
 	ret = sem_timedwait(cgsem, &abs_timeout);
 
 	if (ret) {
 		if (likely(sock_timeout()))
 			return ETIMEDOUT;
+		if (interrupted())
+			goto retry;
 		quitfrom(1, file, func, line, "Failed to sem_timedwait errno=%d cgsem=0x%p", errno, cgsem);
 	}
 	return 0;
@@ -2666,6 +2709,8 @@ void cgsem_reset(cgsem_t *cgsem)
 
 	do {
 		ret = sem_trywait(cgsem);
+		if (unlikely(ret < 0 && interrupted()))
+			ret = 0;
 	} while (!ret);
 }
 

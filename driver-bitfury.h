@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Con Kolivas
+ * Copyright 2013-2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -12,6 +12,7 @@
 
 #include "miner.h"
 #include "usbutils.h"
+#include "mcp2210.h"
 
 #define BXF_CLOCK_DEFAULT 54
 #define BXF_CLOCK_OFF 0
@@ -23,6 +24,38 @@
 #define BXF_TEMP_HYSTERESIS 30
 
 extern int opt_bxf_temp_target;
+extern int opt_nf1_bits;
+extern int opt_bxm_bits;
+
+#define NF1_PIN_LED 0
+#define NF1_PIN_SCK_OVR 5
+#define NF1_PIN_PWR_EN 6
+
+#define SPIBUF_SIZE 16384
+#define BITFURY_REFRESH_DELAY 100
+
+#define SIO_RESET_REQUEST 0
+#define SIO_SET_LATENCY_TIMER_REQUEST 0x09
+#define SIO_SET_EVENT_CHAR_REQUEST    0x06
+#define SIO_SET_ERROR_CHAR_REQUEST    0x07
+#define SIO_SET_BITMODE_REQUEST       0x0B
+#define SIO_RESET_PURGE_RX 1
+#define SIO_RESET_PURGE_TX 2
+
+#define BITMODE_RESET 0x00
+#define BITMODE_MPSSE 0x02
+#define SIO_RESET_SIO 0
+
+#define BXM_LATENCY_MS 2
+
+struct bitfury_payload {
+	unsigned char midstate[32];
+	unsigned int junk[8];
+	unsigned m7;
+	unsigned ntime;
+	unsigned nbits;
+	unsigned nnonce;
+};
 
 struct bitfury_info {
 	struct cgpu_info *base_cgpu;
@@ -33,6 +66,7 @@ struct bitfury_info {
 	double saved_nonces;
 	int cycles;
 	bool valid; /* Set on first valid data being found */
+	bool failing; /* Set when an attempted restart has been sent */
 
 	/* BF1 specific data */
 	uint8_t version;
@@ -43,7 +77,6 @@ struct bitfury_info {
 	/* BXF specific data */
 	pthread_mutex_t lock;
 	pthread_t read_thr;
-	double temperature;
 	int last_decitemp;
 	int max_decitemp;
 	int temp_target;
@@ -58,6 +91,20 @@ struct bitfury_info {
 	int filtered_hw[2]; // Hardware errors we're told about but are filtered
 	int job[2]; // Completed jobs we're told about
 	int submits[2]; // Submitted responses
+
+	/* NF1 specific data */
+	struct mcp_settings mcp;
+	char spibuf[SPIBUF_SIZE];
+	unsigned int spibufsz;
+	int osc6_bits;
+	struct bitfury_payload payload[2];
+	unsigned oldbuf[17 * 2];
+	bool job_switched[2];
+	bool second_run[2];
+	struct work *work[2];
+	struct work *owork[2];
+
+	bool (*spi_txrx)(struct cgpu_info *, struct bitfury_info *info);
 };
 
 #endif /* BITFURY_H */

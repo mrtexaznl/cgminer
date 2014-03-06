@@ -12,8 +12,9 @@ endif
 EXTRA_DIST	= example.conf linux-usb-cgminer \
 		  api-example.php miner.php	\
 		  API.class API.java api-example.c windows-build.txt \
-		  bitstreams/* API-README FPGA-README \
+		  bitstreams/README API-README FPGA-README \
 		  bitforce-firmware-flash.c hexdump.c ASIC-README \
+		  A1-desk-board-selector.c A1-desk-board-selector-tca9535.c \
 		  01-cgminer.rules
 
 SUBDIRS		= lib compat ccan
@@ -43,12 +44,18 @@ cgminer_SOURCES	+= elist.h miner.h compat.h bench_block.h	\
 
 cgminer_SOURCES	+= logging.c
 
+cgminer_SOURCES	+= klist.h klist.c
+
 if NEED_FPGAUTILS
 cgminer_SOURCES += fpgautils.c fpgautils.h
 endif
 
 if WANT_USBUTILS
 cgminer_SOURCES += usbutils.c usbutils.h
+endif
+
+if WANT_LIBBITFURY
+cgminer_SOURCES += libbitfury.c libbitfury.h mcp2210.c mcp2210.h
 endif
 
 # Device drivers
@@ -76,6 +83,11 @@ if HAS_BITFURY
 cgminer_SOURCES += driver-bitfury.c driver-bitfury.h
 endif
 
+if HAS_BITMINE_A1
+cgminer_SOURCES += driver-SPI-bitmine-A1.c
+cgminer_SOURCES += spi-context.c spi-context.h
+endif
+
 if HAS_DRILLBIT
 cgminer_SOURCES += driver-drillbit.c driver-drillbit.h
 endif
@@ -88,12 +100,28 @@ if HAS_KLONDIKE
 cgminer_SOURCES += driver-klondike.c
 endif
 
+if HAS_COINTERRA
+cgminer_SOURCES += driver-cointerra.c driver-cointerra.h
+endif
+
 if HAS_BAB
 cgminer_SOURCES += driver-bab.c
+endif
+
+if HAS_AVALON2
+cgminer_SOURCES += driver-avalon2.c driver-avalon2.h crc16.c crc.h
+endif
+
+if HAS_MINION
+cgminer_SOURCES += driver-minion.c
+endif
+
+if HAS_ANT_S1
+cgminer_SOURCES += driver-bitmain.c driver-bitmain.h
 endif
 
 if HAS_MODMINER
 cgminer_SOURCES += driver-modminer.c
 bitstreamsdir = $(bindir)/bitstreams
-dist_bitstreams_DATA = $(top_srcdir)/bitstreams/*
+dist_bitstreams_DATA = $(top_srcdir)/bitstreams/README
 endif
