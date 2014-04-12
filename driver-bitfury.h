@@ -14,7 +14,6 @@
 #include "usbutils.h"
 #include "mcp2210.h"
 
-#define BXF_CLOCK_DEFAULT 54
 #define BXF_CLOCK_OFF 0
 #define BXF_CLOCK_MIN 32
 #define BXF_CLOCK_MAX 63 // Not really used since we only get hw errors above default
@@ -26,6 +25,7 @@
 extern int opt_bxf_temp_target;
 extern int opt_nf1_bits;
 extern int opt_bxm_bits;
+extern int opt_bxf_bits;
 
 #define NF1_PIN_LED 0
 #define NF1_PIN_SCK_OVR 5
@@ -88,9 +88,9 @@ struct bitfury_info {
 	int hw_rev;
 	int chips;
 	uint8_t clocks; // There are two but we set them equal
-	int filtered_hw[2]; // Hardware errors we're told about but are filtered
-	int job[2]; // Completed jobs we're told about
-	int submits[2]; // Submitted responses
+	int *filtered_hw; // Hardware errors we're told about but are filtered
+	int *job; // Completed jobs we're told about
+	int *submits; // Submitted responses
 
 	/* NF1 specific data */
 	struct mcp_settings mcp;

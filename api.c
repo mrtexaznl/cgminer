@@ -30,7 +30,7 @@
 	defined(USE_HASHFAST) || defined(USE_BITFURY) || defined(USE_KLONDIKE) || \
 	defined(USE_KNC) || defined(USE_BAB) || defined(USE_DRILLBIT) || \
 	defined(USE_MINION) || defined(USE_COINTERRA) || defined(USE_BITMINE_A1) || \
-	defined(USE_ANT_S1)
+	defined(USE_ANT_S1) || defined(USE_SPONDOOLIES)
 #define HAVE_AN_ASIC 1
 #endif
 
@@ -132,7 +132,7 @@ static const char SEPARATOR = '|';
 #define JOIN_CMD "CMD="
 #define BETWEEN_JOIN SEPSTR
 
-static const char *APIVERSION = "3.1";
+static const char *APIVERSION = "3.3";
 static const char *DEAD = "Dead";
 static const char *SICK = "Sick";
 static const char *NOSTART = "NoStart";
@@ -196,6 +196,10 @@ static const char *DEVICECODE = ""
 #ifdef USE_COINTERRA
 			"CTA "
 #endif
+#ifdef USE_SPONDOOLIES
+			"SPN "
+#endif
+
 			"";
 
 static const char *OSINFO =
@@ -1190,7 +1194,13 @@ static struct api_data *print_data(struct io_data *io_data, struct api_data *roo
 				snprintf(buf, sizeof(buf), "%"PRIu32, *((uint32_t *)(root->data)));
 				break;
 			case API_HEX32:
+				if (isjson)
+					add_item_buf(item, JSON1);
 				snprintf(buf, sizeof(buf), "0x%08x", *((uint32_t *)(root->data)));
+				add_item_buf(item, buf);
+				if (isjson)
+					add_item_buf(item, JSON1);
+				done = true;
 				break;
 			case API_UINT64:
 				snprintf(buf, sizeof(buf), "%"PRIu64, *((uint64_t *)(root->data)));
@@ -1997,6 +2007,9 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 		char mhsname[27];
 		sprintf(mhsname, "MHS %ds", opt_log_interval);
 		root = api_add_mhs(root, mhsname, &(cgpu->rolling), false);
+		root = api_add_mhs(root, "MHS 1m", &cgpu->rolling1, false);
+		root = api_add_mhs(root, "MHS 5m", &cgpu->rolling5, false);
+		root = api_add_mhs(root, "MHS 15m", &cgpu->rolling15, false);
 		root = api_add_int(root, "Accepted", &(cgpu->accepted), false);
 		root = api_add_int(root, "Rejected", &(cgpu->rejected), false);
 		root = api_add_int(root, "Hardware Errors", &(cgpu->hw_errors), false);
@@ -2081,6 +2094,9 @@ static void pgastatus(struct io_data *io_data, int pga, bool isjson, bool precom
 		char mhsname[27];
 		sprintf(mhsname, "MHS %ds", opt_log_interval);
 		root = api_add_mhs(root, mhsname, &(cgpu->rolling), false);
+		root = api_add_mhs(root, "MHS 1m", &cgpu->rolling1, false);
+		root = api_add_mhs(root, "MHS 5m", &cgpu->rolling5, false);
+		root = api_add_mhs(root, "MHS 15m", &cgpu->rolling15, false);
 		root = api_add_int(root, "Accepted", &(cgpu->accepted), false);
 		root = api_add_int(root, "Rejected", &(cgpu->rejected), false);
 		root = api_add_int(root, "Hardware Errors", &(cgpu->hw_errors), false);
@@ -2151,6 +2167,95 @@ static void devstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __ma
 #ifdef HAVE_AN_FPGA
 	if (numpga > 0) {
 		for (i = 0; i < numpga; i++) {
+			pgastatus(io_data, i, isjson, isjson && devcount > 0);
+
+			devcount++;
+		}
+	}
+#endif
+
+	if (isjson && io_open)
+		io_close(io_data);
+}
+
+static void edevstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
+{
+	bool io_open = false;
+	int devcount = 0;
+	int numasc = 0;
+	int numpga = 0;
+	int i;
+	time_t howoldsec = 0;
+
+#ifdef HAVE_AN_ASIC
+	numasc = numascs();
+#endif
+
+#ifdef HAVE_AN_FPGA
+	numpga = numpgas();
+#endif
+
+	if (numpga == 0 && numasc == 0) {
+		message(io_data, MSG_NODEVS, 0, NULL, isjson);
+		return;
+	}
+
+	if (param && *param)
+		howoldsec = (time_t)atoi(param);
+
+	message(io_data, MSG_DEVS, 0, NULL, isjson);
+	if (isjson)
+		io_open = io_add(io_data, COMSTR JSON_DEVS);
+
+#ifdef HAVE_AN_ASIC
+	if (numasc > 0) {
+		for (i = 0; i < numasc; i++) {
+#ifdef USE_USBUTILS
+			int dev = ascdevice(i);
+			if (dev < 0) // Should never happen
+				continue;
+
+			struct cgpu_info *cgpu = get_devices(dev);
+			if (!cgpu)
+				continue;
+			if (cgpu->blacklisted)
+				continue;
+			if (cgpu->usbinfo.nodev) {
+				if (howoldsec <= 0)
+					continue;
+				if ((when - cgpu->usbinfo.last_nodev.tv_sec) >= howoldsec)
+					continue;
+			}
+#endif
+
+			ascstatus(io_data, i, isjson, isjson && devcount > 0);
+
+			devcount++;
+		}
+	}
+#endif
+
+#ifdef HAVE_AN_FPGA
+	if (numpga > 0) {
+		for (i = 0; i < numpga; i++) {
+#ifdef USE_USBUTILS
+			int dev = pgadevice(i);
+			if (dev < 0) // Should never happen
+				continue;
+
+			struct cgpu_info *cgpu = get_devices(dev);
+			if (!cgpu)
+				continue;
+			if (cgpu->blacklisted)
+				continue;
+			if (cgpu->usbinfo.nodev) {
+				if (howoldsec <= 0)
+					continue;
+				if ((when - cgpu->usbinfo.last_nodev.tv_sec) >= howoldsec)
+					continue;
+			}
+#endif
+
 			pgastatus(io_data, i, isjson, isjson && devcount > 0);
 
 			devcount++;
@@ -2465,6 +2570,9 @@ static void summary(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __mayb
 	char mhsname[27];
 	sprintf(mhsname, "MHS %ds", opt_log_interval);
 	root = api_add_mhs(root, mhsname, &(total_rolling), false);
+	root = api_add_mhs(root, "MHS 1m", &rolling1, false);
+	root = api_add_mhs(root, "MHS 5m", &rolling5, false);
+	root = api_add_mhs(root, "MHS 15m", &rolling15, false);
 	root = api_add_uint(root, "Found Blocks", &(found_blocks), true);
 	root = api_add_int(root, "Getworks", &(total_getworks), true);
 	root = api_add_int(root, "Accepted", &(total_accepted), true);
@@ -3195,6 +3303,52 @@ static void minerstats(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __m
 		io_close(io_data);
 }
 
+static void minerestats(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
+{
+	struct cgpu_info *cgpu;
+	bool io_open = false;
+	struct api_data *extra;
+	char id[20];
+	int i, j;
+	time_t howoldsec = 0;
+
+	if (param && *param)
+		howoldsec = (time_t)atoi(param);
+
+	message(io_data, MSG_MINESTATS, 0, NULL, isjson);
+	if (isjson)
+		io_open = io_add(io_data, COMSTR JSON_MINESTATS);
+
+	i = 0;
+	for (j = 0; j < total_devices; j++) {
+		cgpu = get_devices(j);
+		if (!cgpu)
+			continue;
+#ifdef USE_USBUTILS
+		if (cgpu->blacklisted)
+			continue;
+		if (cgpu->usbinfo.nodev) {
+			if (howoldsec <= 0)
+				continue;
+			if ((when - cgpu->usbinfo.last_nodev.tv_sec) >= howoldsec)
+				continue;
+		}
+#endif
+		if (cgpu->drv) {
+			if (cgpu->drv->get_api_stats)
+				extra = cgpu->drv->get_api_stats(cgpu);
+			else
+				extra = NULL;
+
+			sprintf(id, "%s%d", cgpu->drv->name, cgpu->device_id);
+			i = itemstats(io_data, i, id, &(cgpu->cgminer_stats), NULL, extra, cgpu, isjson);
+		}
+	}
+
+	if (isjson && io_open)
+		io_close(io_data);
+}
+
 static void failoveronly(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
 {
 	if (param == NULL || *param == '\0') {
@@ -3803,6 +3957,7 @@ struct CMDS {
 	{ "version",		apiversion,	false,	true },
 	{ "config",		minerconfig,	false,	true },
 	{ "devs",		devstatus,	false,	true },
+	{ "edevs",		edevstatus,	false,	true },
 	{ "pools",		poolstatus,	false,	true },
 	{ "summary",		summary,	false,	true },
 #ifdef HAVE_AN_FPGA
@@ -3826,6 +3981,7 @@ struct CMDS {
 	{ "devdetails",		devdetails,	false,	true },
 	{ "restart",		dorestart,	true,	false },
 	{ "stats",		minerstats,	false,	true },
+	{ "estats",		minerestats,	false,	true },
 	{ "check",		checkcommand,	false,	false },
 	{ "failover-only",	failoveronly,	true,	false },
 	{ "coin",		minecoin,	false,	true },
@@ -4494,7 +4650,7 @@ void api(int api_thr_id)
 	struct sockaddr_in cli;
 	socklen_t clisiz;
 	char cmdbuf[100];
-	char *cmd = NULL, *cmdptr, *cmdsbuf;
+	char *cmd = NULL;
 	char *param;
 	bool addrok;
 	char group;
@@ -4705,6 +4861,8 @@ void api(int api_thr_id)
 				}
 
 				if (!did) {
+					char *cmdptr, *cmdsbuf = NULL;
+
 					if (strchr(cmd, CMDJOIN)) {
 						firstjoin = isjoin = true;
 						// cmd + leading+tailing '|' + '\0'

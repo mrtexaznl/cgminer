@@ -51,6 +51,10 @@ Single pool with stratum protocol support:
 
 cgminer -o stratum+tcp://pool:port -u username -p password
 
+Solo mining to local bitcoind:
+
+cgminer -o http://localhost:8332 -u username -p password --btc-address 15qSxP1SQcUX3o4nhkfdbgyoWEFMomJ4rZ
+
 The list of proxy types are:
  http:    standard http 1.1 proxy
  http0:   http 1.0 proxy
@@ -188,10 +192,13 @@ Options for both config file and command line:
 --bitmain-hwerror   Set bitmain device detect hardware error
 --bitmain-options   Set bitmain options baud:miners:asic:timeout:freq
 --bitmain-temp      Set bitmain target temperature
---bxf-temp-target <arg> Set target temperature for BXF devices (default: 82)
+--bxf-bits <arg>    Set max BXF/HXF bits for overclocking (default: 54)
+--bxf-temp-target <arg> Set target temperature for BXF/HXF devices (default: 82)
+--bxm-bits <arg>    Set BXM bits for overclocking (default: 54)
+--btc-address <arg> Set bitcoin target address when solo mining to bitcoind
+--btc-sig <arg>     Set signature to add to coinbase when solo mining (optional)
 --compact           Use compact display without per device statistics
 --debug|-D          Enable debug output
---device|-d <arg>   Select device to use, one value, range and/or comma separated (e.g. 0-2,4) default: all
 --disable-rejecting Automatically disable pools that continually reject shares
 --drillbit-options <arg> Set drillbit options <int|ext>:clock[:clock_divider][:voltage]
 --expiry|-E <arg>   Upper bound on how many seconds after getting work we consider a share from it stale (default: 120)
@@ -202,6 +209,7 @@ Options for both config file and command line:
 --hfa-fan <arg>     Set fanspeed percentage for hashfast, single value or range (default: 10-85)
 --hfa-name <arg>    Set a unique name for a single hashfast device specified with --usb or the first device found
 --hfa-noshed        Disable hashfast dynamic core disabling feature
+--hfa-options <arg> Set hashfast options name:clock (comma separated)
 --hfa-temp-overheat <arg> Set the hashfast overheat throttling temperature (default: 95)
 --hfa-temp-target <arg> Set the hashfast target temperature (0 to disable) (default: 88)
 --hotplug <arg>     Seconds between hotplug checks (0 means never check)
@@ -220,7 +228,6 @@ Options for both config file and command line:
 --quiet|-q          Disable logging output, display status and errors
 --quota|-U <arg>    quota;URL combination for server with load-balance strategy quotas
 --real-quiet        Disable all output
---remove-disabled   Remove disabled devices entirely, as if they didn't exist
 --rotate <arg>      Change multipool strategy from failover to regularly rotate at N minutes (default: 0)
 --round-robin       Change multipool strategy from failover to round robin on failure
 --scan-time|-s <arg> Upper bound on time spent scanning current work, in seconds (default: -1)
@@ -237,6 +244,7 @@ Options for both config file and command line:
 --user|-u <arg>     Username for bitcoin JSON-RPC server
 --userpass|-O <arg> Username:Password pair for bitcoin JSON-RPC server
 --verbose           Log verbose output to stderr as well as status output
+--widescreen        Use extra wide display without toggling
 --worktime          Display extra work time debug information
 Options for command line only:
 --config|-c <arg>   Load a JSON-format configuration file
@@ -272,6 +280,7 @@ ASIC only options:
 --bitburner-fury-voltage <arg> Set BitBurner Fury core voltage, in millivolts
 --bitburner-voltage <arg> Set BitBurner (Avalon) core voltage, in millivolts
 --bxf-temp-target <arg> Set target temperature for BXF devices (default: 82)
+--bxm-bits <arg>    Set BXM bits for overclocking (default: 50)
 --hfa-hash-clock <arg> Set hashfast clock speed (default: 550)
 --hfa-fail-drop <arg> Set how many MHz to drop clockspeed each failure on an overlocked hashfast device (default: 10)
 --hfa-fan <arg>     Set fanspeed percentage for hashfast, single value or range (default: 10-85)
@@ -294,8 +303,8 @@ See FGPA-README for more information regarding this.
 Cgminer should automatically find all of your Avalon ASIC, BFL ASIC, BitForce
 FPGAs, Icarus bitstream FPGAs, Klondike ASIC, ASICMINER usb block erupters,
 KnC ASICs, BaB ASICs, Hashfast ASICs, ModMiner FPGAs, BPMC/BGMC BF1 USB ASICs,
-Bi*fury USB ASICs, Nanofury USB ASICs, Antminer U1 USB ASICs and Cointerra
-devices.
+Bi*fury USB ASICs, Onestring miner USB ASICs, Hexfury USB ASICs, Nanofury USB
+ASICs, Antminer U1/U2/U2+ USB ASICs, Cointerra devices and BFx2 USB ASICs.
 
 ---
 
@@ -398,7 +407,9 @@ This is useful if you unplug a device then plug it back in the same port,
 it usually reappears with the same bus_number but a different device_address
 
 You can see the list of all USB devices on linux with 'sudo lsusb'
-Cgminer will list the recognised USB devices with the '-n' option or the
+Cgminer will list the recognised USB devices
+
+with the '-n' option or the
 '--usb-dump 0' option
 The '--usb-dump N' option with a value of N greater than 0 will dump a lot
 of details about each recognised USB device
@@ -427,17 +438,13 @@ If one of the 10 devices stops working, hotplug - if enabled, as is default
 
   --usb :0 will disable all USB I/O other than to initialise libusb
 
-NOTE: The --device option will limit which devices are in use based on their
-numbering order of the total devices, so if you hotplug USB devices regularly,
-it will not reliably be the same devices.
-
 ---
 
 WHILE RUNNING:
 
 The following options are available while running with a single keypress:
 
- [U]SB device management [P]ool management [S]ettings [D]isplay options [Q]uit
+ [U]SB management [P]ool management [S]ettings [D]isplay options [Q]uit
 
 
 U gives you:
@@ -480,6 +487,8 @@ D gives you:
 [R]PC debug:off
 [W]orkTime details:off
 co[M]pact: off
+[T]oggle status switching:enabled
+[Z]ero statistics
 [L]og interval:5
 
 
@@ -502,32 +511,35 @@ Also many issues and FAQs are covered in the forum thread
 dedicated to this program,
 	http://forum.bitcoin.org/index.php?topic=28402.0
 
+DISPLAY:
+
+The display is roughly split into two portions, the top status window and the
+bottom scrolling log window.
+
+
+STATUS WINDOW
+The status window is split into overall status and per device status.
+
+Overall status:
+
 The output line shows the following:
-(5s):1713.6 (avg):1707.8 Mh/s | A:729  R:8  HW:0  WU:22.53/m
+ (5s):2.469T (1m):2.677T (5m):2.040T (15m):1.014T (avg):2.733Th/s
+
+These are exponentially decaying average hashrates over 5s/1m/5m/15m and an
+average since the start.
+
+Followed by:
+ A:290391  R:5101  HW:145  WU:37610.4/m
 
 Each column is as follows:
-5s:  A 5 second exponentially decaying average hash rate
-avg: An all time average hash rate
 A:  The total difficulty of Accepted shares
 R:  The total difficulty of Rejected shares
 HW:  The number of HardWare errors
 WU:  The Work Utility defined as the number of diff1 shares work / minute
      (accepted or rejected).
 
- BAS 1:  max 67C 3.27V | 62.29G/62.19Gh/s | A:140813 R:256 HW:2860 WU: 852.0/m
-
-Each column is as follows:
-Temperature (if supported)
-Fanspeed (if supported)
-A 5 second exponentially decaying average hash rate
-An all time average hash rate
-The total difficulty of accepted shares
-The total difficulty of rejected shares
-The number of hardware erorrs
-The work utility defined as the number of diff1 shares work / minute
-
-The cgminer status line shows:
- ST: 1  SS: 0  NB: 1  LW: 8  GF: 1  RF: 1
+alternating with:
+ ST: 22  SS: 0  NB: 2  LW: 356090  GF: 0  RF: 0
 
 ST is STaged work items (ready to use).
 SS is Stale Shares discarded (detected and not submitted so don't count as rejects)
@@ -536,12 +548,48 @@ LW is Locally generated Work items
 GF is Getwork Fail Occasions (server slow to provide work)
 RF is Remote Fail occasions (server slow to accept work)
 
-The block display shows:
-Block: 0074c5e482e34a506d2a051a...  Started: [17:17:22]  Best share: 2.71K
+Followed by:
+ Connected to pool.com diff 3.45K with stratum as user me
 
-This shows a short stretch of the current block, when the new block started,
+The diff shown is the current vardiff requested by the pool currently being
+mined at.
+
+Followed by:
+Block: ca0d237f...  Diff:5.01G  Started: [00:14:27]  Best share: 1.18M
+
+This shows a short stretch about the current block, when the new block started,
 and the all time best difficulty share you've found since starting cgminer
 this time.
+
+Per device status:
+
+ 6: HFS Random  : 645MHz  85C  13% 0.79V  | 2.152T / 1.351Th/s
+
+Each column is as follows:
+Temperature (if supported)
+Fanspeed (if supported)
+Voltage (if supported)
+
+A 5 second exponentially decaying average hash rate
+An all time average hash rate
+
+alternating with
+
+ 6: HFS Random  : 645MHz  86C  13% 0.80V  | A:290348 R:1067 HW:88 WU:18901.8/m
+
+The total difficulty of accepted shares
+The total difficulty of rejected shares
+The number of hardware erorrs
+The work utility defined as the number of diff1 shares work / minute
+
+
+LOG WINDOW
+
+All running information is shown here, usually share submission results and
+block update notifications, along with device messages and warnings.
+
+ [2014-03-29 00:24:09] Accepted 1397768d Diff 3.35K/2727 HFS 0 pool 0
+ [2014-03-29 00:24:13] Stratum from pool 0 detected new block
 
 
 ---
@@ -624,6 +672,26 @@ quotas in a configuration file they would be specified thus:
                 "pass" : "passb"
         }
 ]
+
+
+---
+SOLO MINING
+
+Solo mining can be done efficiently as a single pool entry or a backup to
+any other pooled mining and it is recommended everyone have solo mining set up
+as their final backup in case all their other pools are DDoSed/down for the
+security of the network. To enable solo mining, one must be running a local
+bitcoind/bitcoin-qt or have one they have rpc access to. To do this, edit your
+bitcoind configuration file (bitcoin.conf) with the following extra lines,
+using your choice of username and password:
+
+rpcuser=username
+rpcpassword=password
+
+Restart bitcoind, then start cgminer, pointing to the bitcoind and choose a
+btc address with the following options, altering to suit their setup:
+
+cgminer -o http://localhost:8332 -u username -p password --btc-address 15qSxP1SQcUX3o4nhkfdbgyoWEFMomJ4rZ
 
 
 ---

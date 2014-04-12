@@ -83,6 +83,11 @@ char *curly = ":D";
 #include "driver-bflsc.h"
 #endif
 
+#ifdef USE_SPONDOOLIES
+#include "driver-spondoolies.h"
+#endif
+
+
 #ifdef USE_BITFURY
 #include "driver-bitfury.h"
 #endif
@@ -133,6 +138,8 @@ enum benchwork {
 	BENCHWORK_NONCETIME,
 	BENCHWORK_COUNT
 };
+static char *opt_btc_address;
+static char *opt_btc_sig;
 static char *opt_benchfile;
 static bool opt_benchfile_display;
 static FILE *benchfile_in;
@@ -148,7 +155,8 @@ bool opt_loginput;
 bool opt_compact;
 const int opt_cutofftemp = 95;
 int opt_log_interval = 5;
-int opt_queue = 1;
+int opt_queue = 9999;
+static int max_queue = 1;
 int opt_scantime = -1;
 int opt_expiry = 120;
 static const bool opt_time = true;
@@ -163,10 +171,7 @@ bool opt_restart = true;
 bool opt_nogpu;
 
 struct list_head scan_devices;
-static bool devices_enabled[MAX_DEVICES];
-static int opt_devs_enabled;
 static bool opt_display_devs;
-static bool opt_removedisabled;
 int total_devices;
 int zombie_devs;
 static int most_devices;
@@ -178,6 +183,9 @@ bool use_curses = true;
 #else
 bool use_curses;
 #endif
+static bool opt_widescreen;
+static bool alt_status;
+static bool switch_status;
 static bool opt_submit_stale = true;
 static int opt_shares;
 bool opt_fail_only;
@@ -207,22 +215,37 @@ float opt_anu_freq = 200;
 #endif
 bool opt_worktime;
 #ifdef USE_AVALON
-char *opt_avalon_options = NULL;
-char *opt_bitburner_fury_options = NULL;
+char *opt_avalon_options;
+char *opt_bitburner_fury_options;
+static char *opt_set_avalon_fan;
+static char *opt_set_avalon_freq;
+#endif
+#ifdef USE_AVALON2
+static char *opt_set_avalon2_freq;
+static char *opt_set_avalon2_fan;
+static char *opt_set_avalon2_voltage;
 #endif
 #ifdef USE_KLONDIKE
 char *opt_klondike_options = NULL;
 #endif
 #ifdef USE_DRILLBIT
 char *opt_drillbit_options = NULL;
+char *opt_drillbit_auto = NULL;
 #endif
 char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
 char *opt_bitmine_a1_options = NULL;
 #endif
 #ifdef USE_ANT_S1
-char *opt_bitmain_options = NULL;
+char *opt_bitmain_options;
+static char *opt_set_bitmain_fan;
+static char *opt_set_bitmain_freq;
 #endif
+#ifdef USE_HASHFAST
+static char *opt_set_hfa_fan;
+#endif
+static char *opt_set_null;
+
 #ifdef USE_USBUTILS
 char *opt_usb_select = NULL;
 int opt_usbdump = -1;
@@ -283,9 +306,11 @@ pthread_cond_t restart_cond;
 
 pthread_cond_t gws_cond;
 
+double rolling1, rolling5, rolling15;
 double total_rolling;
 double total_mhashes_done;
 static struct timeval total_tv_start, total_tv_end;
+static struct timeval restart_tv_start, update_tv_start;
 
 cglock_t control_lock;
 pthread_mutex_t stats_lock;
@@ -364,6 +389,7 @@ static int include_count;
 #define JSON_LOAD_ERROR_LEN strlen(JSON_LOAD_ERROR)
 #define JSON_MAX_DEPTH 10
 #define JSON_MAX_DEPTH_ERR "Too many levels of JSON includes (limit 10) or a loop"
+#define JSON_WEB_ERROR "WEB config err"
 
 #if defined(unix) || defined(__APPLE__)
 	static char *opt_stderr_cmd = NULL;
@@ -581,6 +607,8 @@ static char *getwork_req = "{\"method\": \"getwork\", \"params\": [], \"id\":0}\
 
 static char *gbt_req = "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
 
+static char *gbt_solo_req = "{\"id\": 0, \"method\": \"getblocktemplate\"}\n";
+
 /* Adjust all the pools' quota to the greatest common denominator after a pool
  * has been added or the quotas changed. */
 void adjust_quota_gcd(void)
@@ -716,31 +744,25 @@ static char *set_int_0_to_10(const char *arg, int *i)
 	return set_int_range(arg, i, 0, 10);
 }
 
-static char __maybe_unused *set_int_0_to_100(const char *arg, int *i)
+static char *set_int_0_to_100(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 0, 100);
 }
 
-#ifdef USE_COINTERRA
 static char *set_int_0_to_255(const char *arg, int *i)
 {
         return set_int_range(arg, i, 0, 255);
 }
-#endif
 
-#if defined(USE_BFLSC) || defined(USE_BITFURY) || defined(USE_HASHFAST)
 static char *set_int_0_to_200(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 0, 200);
 }
-#endif
 
-#ifdef USE_BITFURY
 static char *set_int_32_to_63(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 32, 63);
 }
-#endif
 
 static char *set_int_1_to_10(const char *arg, int *i)
 {
@@ -748,6 +770,7 @@ static char *set_int_1_to_10(const char *arg, int *i)
 }
 
 #ifdef USE_FPGA_SERIAL
+static char *opt_add_serial;
 static char *add_serial(char *arg)
 {
 	string_elist_add(arg, &scan_devices);
@@ -759,49 +782,6 @@ void get_intrange(char *arg, int *val1, int *val2)
 {
 	if (sscanf(arg, "%d-%d", val1, val2) == 1)
 		*val2 = *val1;
-}
-
-static char *set_devices(char *arg)
-{
-	int i, val1 = 0, val2 = 0;
-	char *nextptr;
-
-	if (*arg) {
-		if (*arg == '?') {
-			opt_display_devs = true;
-			return NULL;
-		}
-	} else
-		return "Invalid device parameters";
-
-	nextptr = strtok(arg, ",");
-	if (nextptr == NULL)
-		return "Invalid parameters for set devices";
-	get_intrange(nextptr, &val1, &val2);
-	if (val1 < 0 || val1 > MAX_DEVICES || val2 < 0 || val2 > MAX_DEVICES ||
-	    val1 > val2) {
-		return "Invalid value passed to set devices";
-	}
-
-	for (i = val1; i <= val2; i++) {
-		devices_enabled[i] = true;
-		opt_devs_enabled++;
-	}
-
-	while ((nextptr = strtok(NULL, ",")) != NULL) {
-		get_intrange(nextptr, &val1, &val2);
-		if (val1 < 0 || val1 > MAX_DEVICES || val2 < 0 || val2 > MAX_DEVICES ||
-		val1 > val2) {
-			return "Invalid value passed to set devices";
-		}
-
-		for (i = val1; i <= val2; i++) {
-			devices_enabled[i] = true;
-			opt_devs_enabled++;
-		}
-	}
-
-	return NULL;
 }
 
 static char *set_balance(enum pool_strategy *strategy)
@@ -865,12 +845,12 @@ static void setup_url(struct pool *pool, char *arg)
 	    strncmp(arg, "https://", 8)) {
 		char *httpinput;
 
-		httpinput = malloc(255);
+		httpinput = malloc(256);
 		if (!httpinput)
 			quit(1, "Failed to malloc httpinput");
-		strcpy(httpinput, "http://");
-		strncat(httpinput, arg, 248);
-		pool->rpc_url = httpinput;
+		strcpy(httpinput, "stratum+tcp://");
+		strncat(httpinput, arg, 242);
+		detect_stratum(pool, httpinput);
 	}
 }
 
@@ -975,6 +955,9 @@ static char *enable_debug(bool *flag)
 	return NULL;
 }
 
+static char *opt_set_sched_start;
+static char *opt_set_sched_stop;
+
 static char *set_schedtime(const char *arg, struct schedtime *st)
 {
 	if (sscanf(arg, "%d:%d", &st->tm.tm_hour, &st->tm.tm_min) != 2)
@@ -985,6 +968,17 @@ static char *set_schedtime(const char *arg, struct schedtime *st)
 	return NULL;
 }
 
+static char *set_sched_start(const char *arg)
+{
+	return set_schedtime(arg, &schedstart);
+}
+
+static char *set_sched_stop(const char *arg)
+{
+	return set_schedtime(arg, &schedstop);
+}
+
+static char *opt_set_sharelog;
 static char* set_sharelog(char *arg)
 {
 	char *r = "";
@@ -1008,6 +1002,7 @@ static char* set_sharelog(char *arg)
 }
 
 static char *temp_cutoff_str = NULL;
+static char __maybe_unused *opt_set_temp_cutoff;
 
 char *set_temp_cutoff(char *arg)
 {
@@ -1058,63 +1053,6 @@ static void load_temp_cutoffs()
 	}
 }
 
-static char *set_api_allow(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_allow);
-
-	return NULL;
-}
-
-static char *set_api_groups(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_groups);
-
-	return NULL;
-}
-
-static char *set_api_description(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_description);
-
-	return NULL;
-}
-
-static char *set_api_mcast_addr(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_mcast_addr);
-
-	return NULL;
-}
-
-static char *set_api_mcast_code(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_mcast_code);
-
-	return NULL;
-}
-
-static char *set_api_mcast_des(const char *arg)
-{
-	opt_set_charp(arg, &opt_api_mcast_des);
-
-	return NULL;
-}
-
-#ifdef USE_ICARUS
-static char *set_icarus_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_icarus_options);
-
-	return NULL;
-}
-
-static char *set_icarus_timing(const char *arg)
-{
-	opt_set_charp(arg, &opt_icarus_timing);
-
-	return NULL;
-}
-
 static char *set_float_125_to_500(const char *arg, float *i)
 {
 	char *err = opt_set_floatval(arg, i);
@@ -1127,66 +1065,6 @@ static char *set_float_125_to_500(const char *arg, float *i)
 
 	return NULL;
 }
-#endif
-
-#ifdef USE_AVALON
-static char *set_avalon_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_avalon_options);
-
-	return NULL;
-}
-
-static char *set_bitburner_fury_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_bitburner_fury_options);
-
-	return NULL;
-}
-#endif
-
-#ifdef USE_KLONDIKE
-static char *set_klondike_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_klondike_options);
-
-	return NULL;
-}
-#endif
-
-#ifdef USE_DRILLBIT
-static char *set_drillbit_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_drillbit_options);
-
-	return NULL;
-}
-#endif
-
-#ifdef USE_BAB
-static char *set_bab_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_bab_options);
-
-	return NULL;
-}
-#endif
-#ifdef USE_BITMINE_A1
-static char *set_bitmine_a1_options(const char *arg)
-{
-	opt_set_charp(arg, &opt_bitmine_a1_options);
-
-	return NULL;
-}
-#endif
-#ifdef USE_USBUTILS
-static char *set_usb_select(const char *arg)
-{
-	opt_set_charp(arg, &opt_usb_select);
-
-	return NULL;
-}
-#endif
 
 static char *set_null(const char __maybe_unused *arg)
 {
@@ -1201,13 +1079,13 @@ static struct opt_table opt_config_table[] = {
 		     "Set AntminerU1 frequency in MHz, range 125-500"),
 #endif
 	OPT_WITH_ARG("--api-allow",
-		     set_api_allow, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_allow,
 		     "Allow API access only to the given list of [G:]IP[/Prefix] addresses[/subnets]"),
 	OPT_WITH_ARG("--api-description",
-		     set_api_description, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_description,
 		     "Description placed in the API status header, default: cgminer version"),
 	OPT_WITH_ARG("--api-groups",
-		     set_api_groups, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_groups,
 		     "API one letter groups G:cmd:cmd[,P:cmd:*...] defining the cmds a groups can use"),
 	OPT_WITHOUT_ARG("--api-listen",
 			opt_set_bool, &opt_api_listen,
@@ -1216,13 +1094,13 @@ static struct opt_table opt_config_table[] = {
 			opt_set_bool, &opt_api_mcast,
 			"Enable API Multicast listener, default: disabled"),
 	OPT_WITH_ARG("--api-mcast-addr",
-		     set_api_mcast_addr, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_mcast_addr,
 		     "API Multicast listen address"),
 	OPT_WITH_ARG("--api-mcast-code",
-		     set_api_mcast_code, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_mcast_code,
 		     "Code expected in the API Multicast message, don't use '-'"),
 	OPT_WITH_ARG("--api-mcast-des",
-		     set_api_mcast_des, NULL, NULL,
+		     opt_set_charp, NULL, &opt_api_mcast_des,
 		     "Description appended to the API Multicast reply, default: ''"),
 	OPT_WITH_ARG("--api-mcast-port",
 		     set_int_1_to_65535, opt_show_intval, &opt_api_mcast_port,
@@ -1240,33 +1118,33 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--avalon-cutoff",
 		     set_int_0_to_100, opt_show_intval, &opt_avalon_overheat,
 		     "Set avalon overheat cut off temperature"),
-	OPT_WITH_ARG("--avalon-fan",
-		     set_avalon_fan, NULL, NULL,
+	OPT_WITH_CBARG("--avalon-fan",
+		     set_avalon_fan, NULL, &opt_set_avalon_fan,
 		     "Set fanspeed percentage for avalon, single value or range (default: 20-100)"),
-	OPT_WITH_ARG("--avalon-freq",
-		     set_avalon_freq, NULL, NULL,
+	OPT_WITH_CBARG("--avalon-freq",
+		     set_avalon_freq, NULL, &opt_set_avalon_freq,
 		     "Set frequency range for avalon-auto, single value or range"),
 	OPT_WITH_ARG("--avalon-options",
-		     set_avalon_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_avalon_options,
 		     "Set avalon options baud:miners:asic:timeout:freq:tech"),
 	OPT_WITH_ARG("--avalon-temp",
 		     set_int_0_to_100, opt_show_intval, &opt_avalon_temp,
 		     "Set avalon target temperature"),
 #endif
 #ifdef USE_AVALON2
-	OPT_WITH_ARG("--avalon2-freq",
-		     set_avalon2_freq, NULL, NULL,
+	OPT_WITH_CBARG("--avalon2-freq",
+		     set_avalon2_freq, NULL, &opt_set_avalon2_freq,
 		     "Set frequency range for Avalon2, single value or range"),
-	OPT_WITH_ARG("--avalon2-fan",
-		     set_avalon2_fan, NULL, NULL,
+	OPT_WITH_CBARG("--avalon2-fan",
+		     set_avalon2_fan, NULL, &opt_set_avalon2_fan,
 		     "Set Avalon2 target fan speed"),
-	OPT_WITH_ARG("--avalon2-voltage",
-		     set_avalon2_voltage, NULL, NULL,
+	OPT_WITH_CBARG("--avalon2-voltage",
+		     set_avalon2_voltage, NULL, &opt_set_avalon2_voltage,
 		     "Set Avalon2 core voltage, in millivolts"),
 #endif
 #ifdef USE_BAB
 	OPT_WITH_ARG("--bab-options",
-		     set_bab_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_bab_options,
 		     "Set bab options max:def:min:up:down:hz:delay:trf"),
 #endif
 	OPT_WITHOUT_ARG("--balance",
@@ -1299,7 +1177,7 @@ static struct opt_table opt_config_table[] = {
 		     opt_set_intval, NULL, &opt_bitburner_fury_core_voltage,
 		     "Set BitBurner Fury core voltage, in millivolts"),
 	OPT_WITH_ARG("--bitburner-fury-options",
-		     set_bitburner_fury_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_bitburner_fury_options,
 		     "Override avalon-options for BitBurner Fury boards baud:miners:asic:timeout:freq"),
 #endif
 #ifdef USE_ANT_S1
@@ -1309,11 +1187,11 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--bitmain-cutoff",
 		     set_int_0_to_100, opt_show_intval, &opt_bitmain_overheat,
 		     "Set bitmain overheat cut off temperature"),
-	OPT_WITH_ARG("--bitmain-fan",
-		     set_bitmain_fan, NULL, NULL,
+	OPT_WITH_CBARG("--bitmain-fan",
+		     set_bitmain_fan, NULL, &opt_set_bitmain_fan,
 		     "Set fanspeed percentage for bitmain, single value or range (default: 20-100)"),
-	OPT_WITH_ARG("--bitmain-freq",
-		     set_bitmain_freq, NULL, NULL,
+	OPT_WITH_CBARG("--bitmain-freq",
+		     set_bitmain_freq, NULL, &opt_set_bitmain_freq,
 		     "Set frequency range for bitmain-auto, single value or range"),
 	OPT_WITHOUT_ARG("--bitmain-hwerror",
 			opt_set_bool, &opt_bitmain_hwerror,
@@ -1327,16 +1205,27 @@ static struct opt_table opt_config_table[] = {
 #endif
 #ifdef USE_BITMINE_A1
 	OPT_WITH_ARG("--bitmine-a1-options",
-		     set_bitmine_a1_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_bitmine_a1_options,
 		     "Bitmine A1 options ref_clk_khz:sys_clk_khz:spi_clk_khz:override_chip_num"),
 #endif
 #ifdef USE_BITFURY
+	OPT_WITH_ARG("--bxf-bits",
+		     set_int_32_to_63, opt_show_intval, &opt_bxf_bits,
+		     "Set max BXF/HXF bits for overclocking"),
 	OPT_WITH_ARG("--bxf-temp-target",
 		     set_int_0_to_200, opt_show_intval, &opt_bxf_temp_target,
-		     "Set target temperature for BXF devices"),
+		     "Set target temperature for BXF/HXF devices"),
 	OPT_WITH_ARG("--bxm-bits",
 		     set_int_0_to_100, opt_show_intval, &opt_bxm_bits,
 		     "Set BXM bits for overclocking"),
+#endif
+#ifdef HAVE_LIBCURL
+	OPT_WITH_ARG("--btc-address",
+		     opt_set_charp, NULL, &opt_btc_address,
+		     "Set bitcoin target address when solo mining to bitcoind (mandatory)"),
+	OPT_WITH_ARG("--btc-sig",
+		     opt_set_charp, NULL, &opt_btc_sig,
+		     "Set signature to add to coinbase when solo mining (optional)"),
 #endif
 #ifdef HAVE_CURSES
 	OPT_WITHOUT_ARG("--compact",
@@ -1354,16 +1243,16 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITHOUT_ARG("--debug|-D",
 		     enable_debug, &opt_debug,
 		     "Enable debug output"),
-	OPT_WITH_ARG("--device|-d",
-		     set_devices, NULL, NULL,
-	             "Select device to use, one value, range and/or comma separated (e.g. 0-2,4) default: all"),
 	OPT_WITHOUT_ARG("--disable-rejecting",
 			opt_set_bool, &opt_disable_pool,
 			"Automatically disable pools that continually reject shares"),
 #ifdef USE_DRILLBIT
         OPT_WITH_ARG("--drillbit-options",
-                     set_drillbit_options, NULL, NULL,
-                     "Set drillbit options <int|ext>:clock[:clock_divider][:voltage]"),
+		     opt_set_charp, NULL, &opt_drillbit_options,
+		     "Set drillbit options <int|ext>:clock[:clock_divider][:voltage]"),
+        OPT_WITH_ARG("--drillbit-auto",
+		     opt_set_charp, NULL, &opt_drillbit_auto,
+		     "Enable drillbit automatic tuning <every>:[<gooderr>:<baderr>:<maxerr>]"),
 #endif
 	OPT_WITH_ARG("--expiry|-E",
 		     set_int_0_to_9999, opt_show_intval, &opt_expiry,
@@ -1384,8 +1273,8 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--hfa-fail-drop",
 		     set_int_0_to_100, opt_show_intval, &opt_hfa_fail_drop,
 		     "Set how many MHz to drop clockspeed each failure on an overlocked hashfast device"),
-	OPT_WITH_ARG("--hfa-fan",
-		     set_hfa_fan, NULL, NULL,
+	OPT_WITH_CBARG("--hfa-fan",
+		     set_hfa_fan, NULL, &opt_set_hfa_fan,
 		     "Set fanspeed percentage for hashfast, single value or range (default: 10-85)"),
 	OPT_WITH_ARG("--hfa-name",
 		     opt_set_charp, NULL, &opt_hfa_name,
@@ -1396,6 +1285,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--hfa-ntime-roll",
 		     opt_set_intval, NULL, &opt_hfa_ntime_roll,
 		     opt_hidden),
+	OPT_WITH_ARG("--hfa-options",
+		     opt_set_charp, NULL, &opt_hfa_options,
+		     "Set hashfast options name:clock (comma separated)"),
 	OPT_WITHOUT_ARG("--hfa-pll-bypass",
 			opt_set_bool, &opt_hfa_pll_bypass,
 			opt_hidden),
@@ -1416,10 +1308,10 @@ static struct opt_table opt_config_table[] = {
 		    ),
 #ifdef USE_ICARUS
 	OPT_WITH_ARG("--icarus-options",
-		     set_icarus_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_icarus_options,
 		     opt_hidden),
 	OPT_WITH_ARG("--icarus-timing",
-		     set_icarus_timing, NULL, NULL,
+		     opt_set_charp, NULL, &opt_icarus_timing,
 		     opt_hidden),
 #endif
 #if defined(HAVE_MODMINER)
@@ -1429,7 +1321,7 @@ static struct opt_table opt_config_table[] = {
 #endif
 #ifdef USE_KLONDIKE
 	OPT_WITH_ARG("--klondike-options",
-		     set_klondike_options, NULL, NULL,
+		     opt_set_charp, NULL, &opt_klondike_options,
 		     "Set klondike options clock:temptarget"),
 #endif
 	OPT_WITHOUT_ARG("--load-balance",
@@ -1461,36 +1353,33 @@ static struct opt_table opt_config_table[] = {
 			opt_set_invbool, &opt_submit_stale,
 		        "Don't submit shares if they are detected as stale"),
 	OPT_WITH_ARG("--pass|-p",
-		     set_pass, NULL, NULL,
+		     set_pass, NULL, &opt_set_null,
 		     "Password for bitcoin JSON-RPC server"),
 	OPT_WITHOUT_ARG("--per-device-stats",
 			opt_set_bool, &want_per_device_stats,
 			"Force verbose mode and output per-device statistics"),
 	OPT_WITH_ARG("--pools",
-			opt_set_bool, NULL, NULL, opt_hidden),
+			opt_set_bool, NULL, &opt_set_null, opt_hidden),
 	OPT_WITHOUT_ARG("--protocol-dump|-P",
 			opt_set_bool, &opt_protocol,
 			"Verbose dump of protocol-level activities"),
 	OPT_WITH_ARG("--queue|-Q",
 		     set_int_0_to_9999, opt_show_intval, &opt_queue,
-		     "Minimum number of work items to have queued (0+)"),
+		     "Maximum number of work items to have queued"),
 	OPT_WITHOUT_ARG("--quiet|-q",
 			opt_set_bool, &opt_quiet,
 			"Disable logging output, display status and errors"),
 	OPT_WITH_ARG("--quota|-U",
-		     set_quota, NULL, NULL,
+		     set_quota, NULL, &opt_set_null,
 		     "quota;URL combination for server with load-balance strategy quotas"),
 	OPT_WITHOUT_ARG("--real-quiet",
 			opt_set_bool, &opt_realquiet,
 			"Disable all output"),
-	OPT_WITHOUT_ARG("--remove-disabled",
-		     opt_set_bool, &opt_removedisabled,
-	         "Remove disabled devices entirely, as if they didn't exist"),
 	OPT_WITH_ARG("--retries",
-		     set_null, NULL, NULL,
+		     set_null, NULL, &opt_set_null,
 		     opt_hidden),
 	OPT_WITH_ARG("--retry-pause",
-		     set_null, NULL, NULL,
+		     set_null, NULL, &opt_set_null,
 		     opt_hidden),
 	OPT_WITH_ARG("--rotate",
 		     set_rotate, opt_show_intval, &opt_rotate_period,
@@ -1499,21 +1388,21 @@ static struct opt_table opt_config_table[] = {
 		     set_rr, &pool_strategy,
 		     "Change multipool strategy from failover to round robin on failure"),
 #ifdef USE_FPGA_SERIAL
-	OPT_WITH_ARG("--scan-serial|-S",
-		     add_serial, NULL, NULL,
+	OPT_WITH_CBARG("--scan-serial|-S",
+		     add_serial, NULL, &opt_add_serial,
 		     "Serial port to probe for Serial FPGA Mining device"),
 #endif
 	OPT_WITH_ARG("--scan-time|-s",
 		     set_int_0_to_9999, opt_show_intval, &opt_scantime,
 		     "Upper bound on time spent scanning current work, in seconds"),
-	OPT_WITH_ARG("--sched-start",
-		     set_schedtime, NULL, &schedstart,
+	OPT_WITH_CBARG("--sched-start",
+		     set_sched_start, NULL, &opt_set_sched_start,
 		     "Set a time of day in HH:MM to start mining (a once off without a stop time)"),
-	OPT_WITH_ARG("--sched-stop",
-		     set_schedtime, NULL, &schedstop,
+	OPT_WITH_CBARG("--sched-stop",
+		     set_sched_stop, NULL, &opt_set_sched_stop,
 		     "Set a time of day in HH:MM to stop mining (will quit without a start time)"),
-	OPT_WITH_ARG("--sharelog",
-		     set_sharelog, NULL, NULL,
+	OPT_WITH_CBARG("--sharelog",
+		     set_sharelog, NULL, &opt_set_sharelog,
 		     "Append share log to file"),
 	OPT_WITH_ARG("--shares",
 		     opt_set_intval, NULL, &opt_shares,
@@ -1527,8 +1416,8 @@ static struct opt_table opt_config_table[] = {
 			"Use system log for output messages (default: standard error)"),
 #endif
 #if defined(USE_BITFORCE) || defined(USE_MODMINER) || defined(USE_BFLSC)
-	OPT_WITH_ARG("--temp-cutoff",
-		     set_temp_cutoff, opt_show_intval, &opt_cutofftemp,
+	OPT_WITH_CBARG("--temp-cutoff",
+		     set_temp_cutoff, opt_show_intval, &opt_set_temp_cutoff,
 		     "Temperature where a device will be automatically disabled, one value or comma separated list"),
 #endif
 	OPT_WITHOUT_ARG("--text-only|-T",
@@ -1540,11 +1429,11 @@ static struct opt_table opt_config_table[] = {
 #endif
 	),
 	OPT_WITH_ARG("--url|-o",
-		     set_url, NULL, NULL,
+		     set_url, NULL, &opt_set_null,
 		     "URL for bitcoin JSON-RPC server"),
 #ifdef USE_USBUTILS
 	OPT_WITH_ARG("--usb",
-		     set_usb_select, NULL, NULL,
+		     opt_set_charp, NULL, &opt_usb_select,
 		     "USB device selection"),
 	OPT_WITH_ARG("--usb-dump",
 		     set_int_0_to_10, opt_show_intval, &opt_usbdump,
@@ -1554,14 +1443,17 @@ static struct opt_table opt_config_table[] = {
 			opt_hidden),
 #endif
 	OPT_WITH_ARG("--user|-u",
-		     set_user, NULL, NULL,
+		     set_user, NULL, &opt_set_null,
 		     "Username for bitcoin JSON-RPC server"),
 	OPT_WITH_ARG("--userpass|-O",
-		     set_userpass, NULL, NULL,
+		     set_userpass, NULL, &opt_set_null,
 		     "Username:Password pair for bitcoin JSON-RPC server"),
 	OPT_WITHOUT_ARG("--verbose",
 			opt_set_bool, &opt_log_output,
 			"Log verbose output to stderr as well as status output"),
+	OPT_WITHOUT_ARG("--widescreen",
+			opt_set_bool, &opt_widescreen,
+			"Use extra wide display without toggling"),
 	OPT_WITHOUT_ARG("--worktime",
 			opt_set_bool, &opt_worktime,
 			"Display extra work time debug information"),
@@ -1603,10 +1495,10 @@ static char *parse_config(json_t *config, bool fileconf)
 			if (!val)
 				continue;
 
-			if ((opt->type & OPT_HASARG) && json_is_string(val)) {
+			if ((opt->type & (OPT_HASARG | OPT_PROCESSARG)) && json_is_string(val)) {
 				err = opt->cb_arg(json_string_value(val),
 						  opt->u.arg);
-			} else if ((opt->type & OPT_HASARG) && json_is_array(val)) {
+			} else if ((opt->type & (OPT_HASARG | OPT_PROCESSARG)) && json_is_array(val)) {
 				int n, size = json_array_size(val);
 
 				for (n = 0; n < size && !err; n++) {
@@ -1646,12 +1538,38 @@ static char *parse_config(json_t *config, bool fileconf)
 
 char *cnfbuf = NULL;
 
+#ifdef HAVE_LIBCURL
+char conf_web1[] = "http://";
+char conf_web2[] = "https://";
+
+static char *load_web_config(const char *arg)
+{
+	json_t *val = json_web_config(arg);
+
+	if (!val || !json_is_object(val))
+		return JSON_WEB_ERROR;
+
+	if (!cnfbuf)
+		cnfbuf = strdup(arg);
+
+	config_loaded = true;
+
+	return parse_config(val, true);
+}
+#endif
+
 static char *load_config(const char *arg, void __maybe_unused *unused)
 {
 	json_error_t err;
 	json_t *config;
 	char *json_error;
 	size_t siz;
+
+#ifdef HAVE_LIBCURL
+	if (strncasecmp(arg, conf_web1, sizeof(conf_web1)-1) == 0 ||
+	    strncasecmp(arg, conf_web2, sizeof(conf_web2)-1) == 0)
+		return load_web_config(arg);
+#endif
 
 	if (!cnfbuf)
 		cnfbuf = strdup(arg);
@@ -1757,6 +1675,9 @@ static char *opt_verusage_and_exit(const char *extra)
 #ifdef USE_BITMINE_A1
 		"Bitmine.A1 "
 #endif
+#ifdef USE_SPONDOOLIES
+		"spondoolies "
+#endif
 		"mining support.\n"
 		, packagename);
 	printf("%s", opt_usage(opt_argv0, extra));
@@ -1776,11 +1697,11 @@ char *display_devs(int *ndevs)
 /* These options are available from commandline only */
 static struct opt_table opt_cmdline_table[] = {
 	OPT_WITH_ARG("--config|-c",
-		     load_config, NULL, NULL,
+		     load_config, NULL, &opt_set_null,
 		     "Load a JSON-format configuration file\n"
 		     "See example.conf for an example configuration."),
 	OPT_WITH_ARG("--default-config",
-		     set_default_config, NULL, NULL,
+		     set_default_config, NULL, &opt_set_null,
 		     "Specify the filename of the default config file\n"
 		     "Loaded at start and used when saving without a name."),
 	OPT_WITHOUT_ARG("--help|-h",
@@ -1835,6 +1756,18 @@ static void calc_midstate(struct work *work)
 	endian_flip32(work->midstate, work->midstate);
 }
 
+/* Returns the current value of total_work and increments it */
+static int total_work_inc(void)
+{
+	int ret;
+
+	cg_wlock(&control_lock);
+	ret = total_work++;
+	cg_wunlock(&control_lock);
+
+	return ret;
+}
+
 static struct work *make_work(void)
 {
 	struct work *work = calloc(1, sizeof(struct work));
@@ -1842,9 +1775,7 @@ static struct work *make_work(void)
 	if (unlikely(!work))
 		quit(1, "Failed to calloc work in make_work");
 
-	cg_wlock(&control_lock);
-	work->id = total_work++;
-	cg_wunlock(&control_lock);
+	work->id = total_work_inc();
 
 	return work;
 }
@@ -1877,80 +1808,28 @@ char *workpadding = "00000080000000000000000000000000000000000000000000000000000
  * transaction, and the hashes of the remaining transactions since these
  * remain constant with an altered coinbase when generating work. Must be
  * entered under gbt_lock */
-static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
+static void gbt_merkle_bins(struct pool *pool, json_t *transaction_arr);
+
+static void __build_gbt_txns(struct pool *pool, json_t *res_val)
 {
 	json_t *txn_array;
-	bool ret = false;
-	size_t cal_len;
-	int i;
-
-	free(pool->txn_hashes);
-	pool->txn_hashes = NULL;
-	pool->gbt_txns = 0;
 
 	txn_array = json_object_get(res_val, "transactions");
-	if (!json_is_array(txn_array))
-		goto out;
-
-	ret = true;
-	pool->gbt_txns = json_array_size(txn_array);
-	if (!pool->gbt_txns)
-		goto out;
-
-	pool->txn_hashes = calloc(32 * (pool->gbt_txns + 1), 1);
-	if (unlikely(!pool->txn_hashes))
-		quit(1, "Failed to calloc txn_hashes in __build_gbt_txns");
-
-	for (i = 0; i < pool->gbt_txns; i++) {
-		json_t *txn_val = json_object_get(json_array_get(txn_array, i), "data");
-		const char *txn = json_string_value(txn_val);
-		int txn_len = strlen(txn);
-		unsigned char *txn_bin;
-
-		cal_len = txn_len;
-		align_len(&cal_len);
-		txn_bin = calloc(cal_len, 1);
-		if (unlikely(!txn_bin))
-			quit(1, "Failed to calloc txn_bin in __build_gbt_txns");
-		if (unlikely(!hex2bin(txn_bin, txn, txn_len / 2)))
-			quit(1, "Failed to hex2bin txn_bin");
-
-		gen_hash(txn_bin, pool->txn_hashes + (32 * i), txn_len / 2);
-		free(txn_bin);
-	}
-out:
-	return ret;
+	gbt_merkle_bins(pool, txn_array);
 }
 
-static unsigned char *__gbt_merkleroot(struct pool *pool)
+static void __gbt_merkleroot(struct pool *pool, unsigned char *merkle_root)
 {
-	unsigned char *merkle_hash;
-	int i, txns;
+	unsigned char merkle_sha[64];
+	int i;
 
-	merkle_hash = calloc(32 * (pool->gbt_txns + 2), 1);
-	if (unlikely(!merkle_hash))
-		quit(1, "Failed to calloc merkle_hash in __gbt_merkleroot");
-
-	gen_hash(pool->coinbase, merkle_hash, pool->coinbase_len);
-
-	if (pool->gbt_txns)
-		memcpy(merkle_hash + 32, pool->txn_hashes, pool->gbt_txns * 32);
-
-	txns = pool->gbt_txns + 1;
-	while (txns > 1) {
-		if (txns % 2) {
-			memcpy(&merkle_hash[txns * 32], &merkle_hash[(txns - 1) * 32], 32);
-			txns++;
-		}
-		for (i = 0; i < txns; i += 2){
-			unsigned char hashout[32];
-
-			gen_hash(merkle_hash + (i * 32), hashout, 64);
-			memcpy(merkle_hash + (i / 2 * 32), hashout, 32);
-		}
-		txns /= 2;
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
+	memcpy(merkle_sha, merkle_root, 32);
+	for (i = 0; i < pool->merkles; i++) {
+		memcpy(merkle_sha + 32, pool->merklebin + i * 32, 32);
+		gen_hash(merkle_sha, merkle_root, 64);
+		memcpy(merkle_sha, merkle_root, 32);
 	}
-	return merkle_hash;
 }
 
 static bool work_decode(struct pool *pool, struct work *work, json_t *val);
@@ -1995,7 +1874,7 @@ static void update_gbt(struct pool *pool)
 
 static void gen_gbt_work(struct pool *pool, struct work *work)
 {
-	unsigned char *merkleroot;
+	unsigned char merkleroot[32];
 	struct timeval now;
 	uint64_t nonce2le;
 
@@ -2008,7 +1887,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	memcpy(pool->coinbase + pool->nonce2_offset, &nonce2le, pool->n2size);
 	pool->nonce2++;
 	cg_dwlock(&pool->gbt_lock);
-	merkleroot = __gbt_merkleroot(pool);
+	__gbt_merkleroot(pool, merkleroot);
 
 	memcpy(work->data, &pool->gbt_version, 4);
 	memcpy(work->data + 4, pool->previousblockhash, 32);
@@ -2027,7 +1906,6 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	cg_runlock(&pool->gbt_lock);
 
 	flip32(work->data + 4 + 32, merkleroot);
-	free(merkleroot);
 	memset(work->data + 4 + 32 + 32 + 4 + 4, 0, 4); /* nonce */
 
 	hex2bin(work->data + 4 + 32 + 32 + 4 + 4 + 4, workpadding, 48);
@@ -2044,7 +1922,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	local_work++;
 	work->pool = pool;
 	work->gbt = true;
-	work->id = total_work++;
+	work->id = total_work_inc();
 	work->longpoll = false;
 	work->getwork_mode = GETWORK_MODE_GBT;
 	work->work_block = work_block;
@@ -2172,7 +2050,249 @@ static bool getwork_decode(json_t *res_val, struct work *work)
 /* Returns whether the pool supports local work generation or not. */
 static bool pool_localgen(struct pool *pool)
 {
-	return (pool->has_stratum || pool->has_gbt);
+	return (pool->has_stratum || pool->has_gbt || pool->gbt_solo);
+}
+
+static void gbt_merkle_bins(struct pool *pool, json_t *transaction_arr)
+{
+	unsigned char *hashbin;
+	json_t *arr_val;
+	int i, j, binleft, binlen;
+
+	free(pool->txn_data);
+	pool->txn_data = NULL;
+	pool->transactions = 0;
+	pool->merkles = 0;
+	pool->transactions = json_array_size(transaction_arr);
+	binlen = pool->transactions * 32 + 32;
+	hashbin = alloca(binlen + 32);
+	memset(hashbin, 0, 32);
+	binleft = binlen / 32;
+	if (pool->transactions) {
+		int len = 1, ofs = 0;
+		const char *txn;
+
+		for (i = 0; i < pool->transactions; i++) {
+			arr_val = json_array_get(transaction_arr, i);
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			if (!txn) {
+				applog(LOG_ERR, "Pool %d json_string_value fail - cannot find transaction data",
+					pool->pool_no);
+				return;
+			}
+			len += strlen(txn);
+		}
+
+		pool->txn_data = malloc(len + 1);
+		if (unlikely(!pool->txn_data))
+			quit(1, "Failed to calloc txn_data in gbt_merkle_bins");
+		pool->txn_data[len] = '\0';
+
+		for (i = 0; i < pool->transactions; i++) {
+			unsigned char binswap[32];
+			const char *hash;
+
+			arr_val = json_array_get(transaction_arr, i);
+			hash = json_string_value(json_object_get(arr_val, "hash"));
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			len = strlen(txn);
+			memcpy(pool->txn_data + ofs, txn, len);
+			ofs += len;
+			if (!hash) {
+				unsigned char *txn_bin;
+				int txn_len;
+
+				txn_len = len / 2;
+				txn_bin = malloc(txn_len);
+				if (!txn_bin)
+					quit(1, "Failed to malloc txn_bin in gbt_merkle_bins");
+				hex2bin(txn_bin, txn, txn_len);
+				/* This is needed for pooled mining since only
+				 * transaction data and not hashes are sent */
+				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
+				continue;
+			}
+			if (!hex2bin(binswap, hash, 32)) {
+				applog(LOG_ERR, "Failed to hex2bin hash in gbt_merkle_bins");
+				return;
+			}
+			swab256(hashbin + 32 + 32 * i, binswap);
+		}
+	}
+	if (binleft > 1) {
+		while (42) {
+			if (binleft == 1)
+				break;
+			memcpy(pool->merklebin + (pool->merkles * 32), hashbin + 32, 32);
+			pool->merkles++;
+			if (binleft % 2) {
+				memcpy(hashbin + binlen, hashbin + binlen - 32, 32);
+				binlen += 32;
+				binleft++;
+			}
+			for (i = 32, j = 64; j < binlen; i += 32, j += 64) {
+				gen_hash(hashbin + j, hashbin + i, 64);
+			}
+			binleft /= 2;
+			binlen = binleft * 32;
+		}
+	}
+	if (opt_debug) {
+		char hashhex[68];
+
+		for (i = 0; i < pool->merkles; i++) {
+			__bin2hex(hashhex, pool->merklebin + i * 32, 32);
+			applog(LOG_DEBUG, "MH%d %s",i, hashhex);
+		}
+	}
+	applog(LOG_INFO, "Stored %d transactions from pool %d", pool->transactions,
+		pool->pool_no);
+}
+
+static double diff_from_target(void *target);
+
+static const char scriptsig_header[] = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
+static unsigned char scriptsig_header_bin[41];
+
+static bool gbt_solo_decode(struct pool *pool, json_t *res_val)
+{
+	json_t *transaction_arr, *coinbase_aux;
+	const char *previousblockhash;
+	unsigned char hash_swap[32];
+	struct timeval now;
+	const char *target;
+	uint64_t coinbasevalue;
+	const char *flags;
+	const char *bits;
+	char header[228];
+	int ofs = 0, len;
+	uint64_t *u64;
+	uint32_t *u32;
+	int version;
+	int curtime;
+	int height;
+
+	previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
+	target = json_string_value(json_object_get(res_val, "target"));
+	transaction_arr = json_object_get(res_val, "transactions");
+	version = json_integer_value(json_object_get(res_val, "version"));
+	curtime = json_integer_value(json_object_get(res_val, "curtime"));
+	bits = json_string_value(json_object_get(res_val, "bits"));
+	height = json_integer_value(json_object_get(res_val, "height"));
+	coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
+	coinbase_aux = json_object_get(res_val, "coinbaseaux");
+	flags = json_string_value(json_object_get(coinbase_aux, "flags"));
+
+	if (!previousblockhash || !target || !version || !curtime || !bits || !coinbase_aux || !flags) {
+		applog(LOG_ERR, "Pool %d JSON failed to decode GBT", pool->pool_no);
+		return false;
+	}
+
+	applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
+	applog(LOG_DEBUG, "target: %s", target);
+	applog(LOG_DEBUG, "version: %d", version);
+	applog(LOG_DEBUG, "curtime: %d", curtime);
+	applog(LOG_DEBUG, "bits: %s", bits);
+	applog(LOG_DEBUG, "height: %d", height);
+	applog(LOG_DEBUG, "flags: %s", flags);
+
+	cg_wlock(&pool->gbt_lock);
+	hex2bin(hash_swap, previousblockhash, 32);
+	swap256(pool->previousblockhash, hash_swap);
+	__bin2hex(pool->prev_hash, pool->previousblockhash, 32);
+
+	hex2bin(hash_swap, target, 32);
+	swab256(pool->gbt_target, hash_swap);
+	pool->sdiff = diff_from_target(pool->gbt_target);
+
+	pool->gbt_version = htobe32(version);
+	pool->curtime = htobe32(curtime);
+	snprintf(pool->ntime, 9, "%08x", curtime);
+	snprintf(pool->bbversion, 9, "%08x", version);
+	snprintf(pool->nbit, 9, "%s", bits);
+	pool->nValue = coinbasevalue;
+	hex2bin((unsigned char *)&pool->gbt_bits, bits, 4);
+	gbt_merkle_bins(pool, transaction_arr);
+	pool->height = height;
+
+	memset(pool->scriptsig_base, 0, 42);
+	ofs++; // Leave room for template length
+
+	/* Put block height at start of template. */
+	ofs += ser_number(pool->scriptsig_base + ofs, height); // max 5
+
+	/* Followed by flags */
+	len = strlen(flags) / 2;
+	pool->scriptsig_base[ofs++] = len;
+	hex2bin(pool->scriptsig_base + ofs, flags, len);
+	ofs += len;
+
+	/* Followed by timestamp */
+	cgtime(&now);
+	pool->scriptsig_base[ofs++] = 0xfe; // Encode seconds as u32
+	u32 = (uint32_t *)&pool->scriptsig_base[ofs];
+	*u32 = htole32(now.tv_sec);
+	ofs += 4; // sizeof uint32_t
+	pool->scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
+	u32 = (uint32_t *)&pool->scriptsig_base[ofs];
+	*u32 = htole32(now.tv_usec);
+	ofs += 4; // sizeof uint32_t
+
+	memcpy(pool->scriptsig_base + ofs, "\x09\x63\x67\x6d\x69\x6e\x65\x72\x34\x32", 10);
+	ofs += 10;
+
+	/* Followed by extranonce size, fixed at 8 */
+	pool->scriptsig_base[ofs++] = 8;
+	pool->nonce2_offset = 41 + ofs;
+	ofs += 8;
+
+	if (opt_btc_sig) {
+		len = strlen(opt_btc_sig);
+		if (len > 32)
+			len = 32;
+		pool->scriptsig_base[ofs++] = len;
+		memcpy(pool->scriptsig_base + ofs, opt_btc_sig, len);
+		ofs += len;
+	}
+
+	pool->scriptsig_base[0] = ofs++; // Template length
+	pool->n1_len = ofs;
+
+	len = 	41 // prefix
+		+ ofs // Template length
+		+ 4 // txin sequence no
+		+ 1 // transactions
+		+ 8 // value
+		+ 1 + 25 // txout
+		+ 4; // lock
+	free(pool->coinbase);
+	pool->coinbase = calloc(len, 1);
+	if (unlikely(!pool->coinbase))
+		quit(1, "Failed to calloc coinbase in gbt_solo_decode");
+
+	memcpy(pool->coinbase + 41, pool->scriptsig_base, ofs);
+	memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
+	pool->coinbase[41 + ofs + 4] = 1;
+	u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
+	*u64 = htole64(coinbasevalue);
+
+	pool->nonce2 = 0;
+	pool->n2size = 4;
+	pool->coinbase_len = 41 + ofs + 4 + 1 + 8 + 1 + 25 + 4;
+	cg_wunlock(&pool->gbt_lock);
+
+	snprintf(header, 225, "%s%s%s%s%s%s%s",
+		 pool->bbversion,
+		 pool->prev_hash,
+		 "0000000000000000000000000000000000000000000000000000000000000000",
+		 pool->ntime,
+		 pool->nbit,
+		 "00000000", /* nonce */
+		 workpadding);
+	if (unlikely(!hex2bin(pool->header_bin, header, 112)))
+		quit(1, "Failed to hex2bin header in gbt_solo_decode");
+
+	return true;
 }
 
 static bool work_decode(struct pool *pool, struct work *work, json_t *val)
@@ -2185,8 +2305,6 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 		applog(LOG_ERR, "JSON Failed to decode result");
 		goto out;
 	}
-
-
 
 	// STAGE1 goes here
 
@@ -2205,8 +2323,12 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 
 
 
-
-	if (pool->has_gbt) {
+	if (pool->gbt_solo) {
+		if (unlikely(!gbt_solo_decode(pool, res_val)))
+			goto out;
+		ret = true;
+		goto out;
+	} else if (pool->has_gbt) {
 		if (unlikely(!gbt_decode(pool, res_val)))
 			goto out;
 		work->gbt = true;
@@ -2242,13 +2364,15 @@ int dev_from_id(int thr_id)
 }
 
 /* Create an exponentially decaying average over the opt_log_interval */
-void decay_time(double *f, double fadd, double fsecs)
+void decay_time(double *f, double fadd, double fsecs, double interval)
 {
 	double ftotal, fprop;
 
-	fprop = 1.0 - 1 / (exp(fsecs / (double)opt_log_interval));
+	if (fsecs <= 0)
+		return;
+	fprop = 1.0 - 1 / (exp(fsecs / interval));
 	ftotal = 1.0 + fprop;
-	*f += (fadd * fprop);
+	*f += (fadd / fsecs * fprop);
 	*f /= ftotal;
 }
 
@@ -2377,6 +2501,22 @@ double cgpu_runtime(struct cgpu_info *cgpu)
 	return dev_runtime;
 }
 
+double tsince_restart(void)
+{
+	struct timeval now;
+
+	cgtime(&now);
+	return tdiff(&now, &restart_tv_start);
+}
+
+double tsince_update(void)
+{
+	struct timeval now;
+
+	cgtime(&now);
+	return tdiff(&now, &update_tv_start);
+}
+
 static void get_statline(char *buf, size_t bufsiz, struct cgpu_info *cgpu)
 {
 	char displayed_hashes[16], displayed_rolling[16];
@@ -2427,16 +2567,28 @@ static bool shared_strategy(void)
 static void curses_print_status(void)
 {
 	struct pool *pool = current_pool();
+	int linewidth = opt_widescreen ? 100 : 80;
 
 	wattron(statuswin, A_BOLD);
 	cg_mvwprintw(statuswin, 0, 0, " " PACKAGE " version " VERSION " - Started: %s", datestamp);
 	wattroff(statuswin, A_BOLD);
-	mvwhline(statuswin, 1, 0, '-', 98);
+	mvwhline(statuswin, 1, 0, '-', linewidth);
 	cg_mvwprintw(statuswin, 2, 0, " %s", statusline);
 	wclrtoeol(statuswin);
-	cg_mvwprintw(statuswin, 3, 0, " ST: %d  SS: %d  NB: %d  LW: %d  GF: %d  RF: %d",
-		total_staged(), total_stale, new_blocks,
-		local_work, total_go, total_ro);
+	if (opt_widescreen) {
+		cg_mvwprintw(statuswin, 3, 0, " A:%.0f  R:%.0f  HW:%d  WU:%.1f/m |"
+			     " ST: %d  SS: %d  NB: %d  LW: %d  GF: %d  RF: %d",
+			     total_diff_accepted, total_diff_rejected, hw_errors,
+			     total_diff1 / total_secs * 60,
+			     total_staged(), total_stale, new_blocks, local_work, total_go, total_ro);
+	} else if (alt_status) {
+		cg_mvwprintw(statuswin, 3, 0, " ST: %d  SS: %d  NB: %d  LW: %d  GF: %d  RF: %d",
+			     total_staged(), total_stale, new_blocks, local_work, total_go, total_ro);
+	} else {
+		cg_mvwprintw(statuswin, 3, 0, " A:%.0f  R:%.0f  HW:%d  WU:%.1f/m",
+			     total_diff_accepted, total_diff_rejected, hw_errors,
+			     total_diff1 / total_secs * 60);
+	}
 	wclrtoeol(statuswin);
 	if (shared_strategy() && total_pools > 1) {
 		cg_mvwprintw(statuswin, 4, 0, " Connected to multiple pools with%s block change notify",
@@ -2452,10 +2604,10 @@ static void curses_print_status(void)
 	wclrtoeol(statuswin);
 	cg_mvwprintw(statuswin, 5, 0, " Block: %s...  Diff:%s  Started: %s  Best share: %s   ",
 		     prev_block, block_diff, blocktime, best_share);
-	mvwhline(statuswin, 6, 0, '-', 98);
-	mvwhline(statuswin, statusy - 1, 0, '-', 98);
+	mvwhline(statuswin, 6, 0, '-', linewidth);
+	mvwhline(statuswin, statusy - 1, 0, '-', linewidth);
 #ifdef USE_USBUTILS
-	cg_mvwprintw(statuswin, devcursor - 1, 1, "[U]SB device management [P]ool management [S]ettings [D]isplay options [Q]uit");
+	cg_mvwprintw(statuswin, devcursor - 1, 1, "[U]SB management [P]ool management [S]ettings [D]isplay options [Q]uit");
 #else
 	cg_mvwprintw(statuswin, devcursor - 1, 1, "[P]ool management [S]ettings [D]isplay options [Q]uit");
 #endif
@@ -2473,16 +2625,13 @@ static void adj_fwidth(float var, int *length)
 		(*length)++;
 }
 
-static int dev_width;
 #define STATBEFORELEN 23
 const char blanks[] = "                                        ";
 
 static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 {
 	static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
-	char logline[256];
-	char displayed_hashes[16], displayed_rolling[16];
-	uint64_t dh64, dr64;
+	char logline[256], unique_id[12];
 	struct timeval now;
 	double dev_runtime, wu;
 	unsigned int devstatlen;
@@ -2511,8 +2660,14 @@ static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 
 	wmove(statuswin,devcursor + count, 0);
 	adj_width(devno, &devno_width);
-	cg_wprintw(statuswin, " %*d: %s %*d: ", devno_width, devno, cgpu->drv->name,
-		   dev_width, cgpu->device_id);
+	if (cgpu->unique_id) {
+		unique_id[8] = '\0';
+		memcpy(unique_id, blanks, 8);
+		strncpy(unique_id, cgpu->unique_id, 8);
+	} else
+		sprintf(unique_id, "%-8d", cgpu->device_id);
+	cg_wprintw(statuswin, " %*d: %s %-8s: ", devno_width, devno, cgpu->drv->name,
+		   unique_id);
 	logline[0] = '\0';
 	cgpu->drv->get_statline_before(logline, sizeof(logline), cgpu);
 	devstatlen = strlen(logline);
@@ -2520,10 +2675,6 @@ static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 		strncat(logline, blanks, STATBEFORELEN - devstatlen);
 	cg_wprintw(statuswin, "%s | ", logline);
 
-	dh64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
-	dr64 = (double)cgpu->rolling * 1000000ull;
-	suffix_string(dh64, displayed_hashes, sizeof(displayed_hashes), 4);
-	suffix_string(dr64, displayed_rolling, sizeof(displayed_rolling), 4);
 
 #ifdef USE_USBUTILS
 	if (cgpu->usbinfo.nodev)
@@ -2538,19 +2689,45 @@ static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 		cg_wprintw(statuswin, "OFF   ");
 	else if (cgpu->deven == DEV_RECOVER)
 		cg_wprintw(statuswin, "REST  ");
-	else
-		cg_wprintw(statuswin, "%6s", displayed_rolling);
-	adj_fwidth(cgpu->diff_accepted, &dawidth);
-	adj_fwidth(cgpu->diff_rejected, &drwidth);
-	adj_width(cgpu->hw_errors, &hwwidth);
-	adj_width(wu, &wuwidth);
+	else if (opt_widescreen) {
+		char displayed_hashes[16], displayed_rolling[16];
+		uint64_t d64;
 
-	cg_wprintw(statuswin, "/%6sh/s | A:%*.0f R:%*.0f HW:%*d WU:%*.1f/m",
-			displayed_hashes,
-			dawidth, cgpu->diff_accepted,
-			drwidth, cgpu->diff_rejected,
-			hwwidth, cgpu->hw_errors,
-			wuwidth + 2, wu);
+		d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
+		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
+		d64 = (double)cgpu->rolling * 1000000ull;
+		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
+		adj_width(wu, &wuwidth);
+		adj_fwidth(cgpu->diff_accepted, &dawidth);
+		adj_fwidth(cgpu->diff_rejected, &drwidth);
+		adj_width(cgpu->hw_errors, &hwwidth);
+		cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m "
+				"A:%*.0f R:%*.0f HW:%*d",
+				displayed_rolling,
+				displayed_hashes, wuwidth + 2, wu,
+				dawidth, cgpu->diff_accepted,
+				drwidth, cgpu->diff_rejected,
+				hwwidth, cgpu->hw_errors);
+	} else if (!alt_status) {
+		char displayed_hashes[16], displayed_rolling[16];
+		uint64_t d64;
+
+		d64 = (double)cgpu->total_mhashes / dev_runtime * 1000000ull;
+		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
+		d64 = (double)cgpu->rolling * 1000000ull;
+		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
+		adj_width(wu, &wuwidth);
+		cg_wprintw(statuswin, "%6s / %6sh/s WU:%*.1f/m", displayed_rolling,
+			   displayed_hashes, wuwidth + 2, wu);
+	} else {
+		adj_fwidth(cgpu->diff_accepted, &dawidth);
+		adj_fwidth(cgpu->diff_rejected, &drwidth);
+		adj_width(cgpu->hw_errors, &hwwidth);
+		cg_wprintw(statuswin, "A:%*.0f R:%*.0f HW:%*d",
+				dawidth, cgpu->diff_accepted,
+				drwidth, cgpu->diff_rejected,
+				hwwidth, cgpu->hw_errors);
+	}
 
 	logline[0] = '\0';
 	cgpu->drv->get_statline(logline, sizeof(logline), cgpu);
@@ -2857,7 +3034,8 @@ static void show_hash(struct work *work, char *hashshow)
 	char diffdisp[16];
 	unsigned long h32;
 	uint32_t *hash32;
-	int intdiff, ofs;
+	uint64_t uintdiff;
+	int ofs;
 
 	swab256(rhash, work->hash);
 	for (ofs = 0; ofs <= 28; ofs ++) {
@@ -2866,9 +3044,9 @@ static void show_hash(struct work *work, char *hashshow)
 	}
 	hash32 = (uint32_t *)(rhash + ofs);
 	h32 = be32toh(*hash32);
-	intdiff = round(work->work_difficulty);
+	uintdiff = round(work->work_difficulty);
 	suffix_string(work->share_diff, diffdisp, sizeof (diffdisp), 0);
-	snprintf(hashshow, 64, "%08lx Diff %s/%d%s", h32, diffdisp, intdiff,
+	snprintf(hashshow, 64, "%08lx Diff %s/%"PRIu64"%s", h32, diffdisp, uintdiff,
 		 work->block? " BLOCK!" : "");
 }
 
@@ -2893,7 +3071,6 @@ static void print_status(int thr_id)
 
 static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 {
-	char *hexstr = NULL;
 	json_t *val, *res, *err;
 	char *s;
 	bool rc = false;
@@ -2909,51 +3086,60 @@ static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 
 	cgpu = get_thr_cgpu(thr_id);
 
-	endian_flip128(work->data, work->data);
-
-	/* build hex string */
-	hexstr = bin2hex(work->data, sizeof(work->data));
-
 	/* build JSON-RPC request */
 	if (work->gbt) {
-		char *gbt_block, *varint;
+		char gbt_block[1024], varint[12];
 		unsigned char data[80];
 
 		flip80(data, work->data);
-		gbt_block = bin2hex(data, 80);
+		__bin2hex(gbt_block, data, 80); // 160 length
 
 		if (work->gbt_txns < 0xfd) {
-			uint8_t val = work->gbt_txns;
+			uint8_t val8 = work->gbt_txns;
 
-			varint = bin2hex((const unsigned char *)&val, 1);
+			__bin2hex(varint, (const unsigned char *)&val8, 1);
 		} else if (work->gbt_txns <= 0xffff) {
-			uint16_t val = htole16(work->gbt_txns);
+			uint16_t val16 = htole16(work->gbt_txns);
 
-			gbt_block = realloc_strcat(gbt_block, "fd");
-			varint = bin2hex((const unsigned char *)&val, 2);
+			strcat(gbt_block, "fd"); // +2
+			__bin2hex(varint, (const unsigned char *)&val16, 2);
 		} else {
-			uint32_t val = htole32(work->gbt_txns);
+			uint32_t val32 = htole32(work->gbt_txns);
 
-			gbt_block = realloc_strcat(gbt_block, "fe");
-			varint = bin2hex((const unsigned char *)&val, 4);
+			strcat(gbt_block, "fe"); // +2
+			__bin2hex(varint, (const unsigned char *)&val32, 4);
 		}
-		gbt_block = realloc_strcat(gbt_block, varint);
-		free(varint);
-		gbt_block = realloc_strcat(gbt_block, work->coinbase);
+		strcat(gbt_block, varint); // +8 max
+		strcat(gbt_block, work->coinbase);
 
-		s = strdup("{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"");
-		s = realloc_strcat(s, gbt_block);
+		s = malloc(1024);
+		if (unlikely(!s))
+			quit(1, "Failed to malloc s in submit_upstream_work");
+		sprintf(s, "{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"%s", gbt_block);
+		/* Has submit/coinbase support */
+		if (!pool->has_gbt) {
+			cg_rlock(&pool->gbt_lock);
+			if (pool->txn_data)
+				s = realloc_strcat(s, pool->txn_data);
+			cg_runlock(&pool->gbt_lock);
+		}
 		if (work->job_id) {
 			s = realloc_strcat(s, "\", {\"workid\": \"");
 			s = realloc_strcat(s, work->job_id);
 			s = realloc_strcat(s, "\"}]}");
 		} else
-			s = realloc_strcat(s, "\", {}]}");
-		free(gbt_block);
+			s = realloc_strcat(s, "\"]}");
 	} else {
+		char *hexstr;
+
+		endian_flip128(work->data, work->data);
+
+		/* build hex string */
+		hexstr = bin2hex(work->data, 118);
 		s = strdup("{\"method\": \"getwork\", \"params\": [ \"");
 		s = realloc_strcat(s, hexstr);
 		s = realloc_strcat(s, "\" ], \"id\":1}");
+		free(hexstr);
 	}
 	applog(LOG_DEBUG, "DBG: sending %s submit RPC call: %s", pool->rpc_url, s);
 	s = realloc_strcat(s, "\n");
@@ -3058,7 +3244,6 @@ static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 
 	rc = true;
 out:
-	free(hexstr);
 	return rc;
 }
 
@@ -3071,9 +3256,9 @@ static bool get_upstream_work(struct work *work, CURL *curl)
 	bool rc = false;
 	char *url;
 
-	applog(LOG_DEBUG, "DBG: sending %s get RPC call: %s", pool->rpc_url, pool->rpc_req);
-
 	url = pool->rpc_url;
+
+	applog(LOG_DEBUG, "DBG: sending %s get RPC call: %s", url, pool->rpc_req);
 
 	cgtime(&work->tv_getwork);
 
@@ -3264,6 +3449,17 @@ static double le256todouble(const void *target)
 	return dcut64;
 }
 
+static double diff_from_target(void *target)
+{
+	double d64, dcut64;
+
+	d64 = truediffone;
+	dcut64 = le256todouble(target);
+	if (unlikely(!dcut64))
+		dcut64 = 1;
+	return d64 / dcut64;
+}
+
 /*
  * Calculate the work->work_difficulty based on the work->target
  */
@@ -3275,15 +3471,9 @@ static void calc_diff(struct work *work, double known)
 
 	if (known)
 		work->work_difficulty = known;
-	else {
-		double d64, dcut64;
+	else
+		work->work_difficulty = diff_from_target(work->target);
 
-		d64 = truediffone;
-		dcut64 = le256todouble(work->target);
-		if (unlikely(!dcut64))
-			dcut64 = 1;
-		work->work_difficulty = d64 / dcut64;
-	}
 	difficulty = work->work_difficulty;
 
 	pool_stats->last_diff = difficulty;
@@ -3750,7 +3940,19 @@ static inline bool can_roll(struct work *work)
 		work->rolls < 7000 && !stale_work(work, false));
 }
 
-static void roll_work(struct work *work)
+/* Adjust an existing char ntime field with a relative noffset */
+static void modify_ntime(char *ntime, int noffset)
+{
+	unsigned char bin[4];
+	uint32_t h32, *be32 = (uint32_t *)bin;
+
+	hex2bin(bin, ntime, 4);
+	h32 = be32toh(*be32) + noffset;
+	*be32 = htobe32(h32);
+	__bin2hex(ntime, bin, 4);
+}
+
+void roll_work(struct work *work)
 {
 	uint32_t *work_ntime;
 	uint32_t ntime;
@@ -3765,10 +3967,13 @@ static void roll_work(struct work *work)
 	work->rolls++;
 	work->nonce = 0;
 	applog(LOG_DEBUG, "Successfully rolled work");
+	/* Change the ntime field if this is stratum work */
+	if (work->ntime)
+		modify_ntime(work->ntime, 1);
 
 	/* This is now a different work item so it needs a different ID for the
 	 * hashtable */
-	work->id = total_work++;
+	work->id = total_work_inc();
 }
 
 static void *submit_work_thread(void *userdata)
@@ -3814,7 +4019,7 @@ static void *submit_work_thread(void *userdata)
 	return NULL;
 }
 
-static struct work *make_clone(struct work *work)
+struct work *make_clone(struct work *work)
 {
 	struct work *work_clone = copy_work(work);
 
@@ -4333,6 +4538,7 @@ static void restart_threads(void)
 {
 	pthread_t rthread;
 
+	cgtime(&restart_tv_start);
 	if (unlikely(pthread_create(&rthread, NULL, restart_thread, NULL)))
 		quit(1, "Failed to create restart thread");
 }
@@ -4343,6 +4549,7 @@ static void signal_work_update(void)
 
 	applog(LOG_INFO, "Work update message received");
 
+	cgtime(&update_tv_start);
 	rd_lock(&mining_thr_lock);
 	for (i = 0; i < mining_threads; i++)
 		mining_thr[i]->work_update = true;
@@ -4478,9 +4685,9 @@ static bool test_work_current(struct work *work)
 				applog(LOG_NOTICE, "%sLONGPOLL from pool %d detected new block",
 				       work->gbt ? "GBT " : "", work->pool->pool_no);
 			}
-		} else if (have_longpoll)
+		} else if (have_longpoll && !pool->gbt_solo)
 			applog(LOG_NOTICE, "New block detected on network before pool notification");
-		else
+		else if (!pool->gbt_solo)
 			applog(LOG_NOTICE, "New block detected on network");
 		restart_threads();
 	} else {
@@ -4693,6 +4900,7 @@ static char *json_escape(char *str)
 
 void write_config(FILE *fcfg)
 {
+	struct opt_table *opt;
 	int i;
 
 	/* Write pool values */
@@ -4719,29 +4927,57 @@ void write_config(FILE *fcfg)
 		}
 	fputs("\n]\n", fcfg);
 
-	/* Simple bool and int options */
-	struct opt_table *opt;
+	/* Simple bool,int and char options */
 	for (opt = opt_config_table; opt->type != OPT_END; opt++) {
 		char *p, *name = strdup(opt->names);
+
 		for (p = strtok(name, "|"); p; p = strtok(NULL, "|")) {
 			if (p[1] != '-')
 				continue;
+
+			if (opt->desc == opt_hidden)
+				continue;
+
 			if (opt->type & OPT_NOARG &&
 			   ((void *)opt->cb == (void *)opt_set_bool || (void *)opt->cb == (void *)opt_set_invbool) &&
-			   (*(bool *)opt->u.arg == ((void *)opt->cb == (void *)opt_set_bool)))
+			   (*(bool *)opt->u.arg == ((void *)opt->cb == (void *)opt_set_bool))) {
 				fprintf(fcfg, ",\n\"%s\" : true", p+2);
+				continue;
+			}
 
 			if (opt->type & OPT_HASARG &&
-			   ((void *)opt->cb_arg == (void *)set_int_0_to_9999 ||
-			   (void *)opt->cb_arg == (void *)set_int_1_to_65535 ||
-			   (void *)opt->cb_arg == (void *)set_int_0_to_10 ||
-			   (void *)opt->cb_arg == (void *)set_int_1_to_10) && opt->desc != opt_hidden)
+			    ((void *)opt->cb_arg == (void *)opt_set_intval ||
+			     (void *)opt->cb_arg == (void *)set_int_0_to_9999 ||
+			     (void *)opt->cb_arg == (void *)set_int_1_to_65535 ||
+			     (void *)opt->cb_arg == (void *)set_int_0_to_10 ||
+			     (void *)opt->cb_arg == (void *)set_int_1_to_10 ||
+			     (void *)opt->cb_arg == (void *)set_int_0_to_100 ||
+			     (void *)opt->cb_arg == (void *)set_int_0_to_255 ||
+			     (void *)opt->cb_arg == (void *)set_int_0_to_200 ||
+			     (void *)opt->cb_arg == (void *)set_int_32_to_63)) {
 				fprintf(fcfg, ",\n\"%s\" : \"%d\"", p+2, *(int *)opt->u.arg);
+				continue;
+			}
+
+			if (opt->type & OPT_HASARG &&
+			    ((void *)opt->cb_arg == (void *)set_float_125_to_500)) {
+				fprintf(fcfg, ",\n\"%s\" : \"%.1f\"", p+2, *(float *)opt->u.arg);
+				continue;
+			}
+
+			if (opt->type & (OPT_HASARG | OPT_PROCESSARG) &&
+			    (opt->u.arg != &opt_set_null)) {
+				char *carg = *(char **)opt->u.arg;
+
+				if (carg)
+					fprintf(fcfg, ",\n\"%s\" : \"%s\"", p+2, json_escape(carg));
+				continue;
+			}
 		}
+		free(name);
 	}
 
 	/* Special case options */
-	fprintf(fcfg, ",\n\"shares\" : \"%d\"", opt_shares);
 	if (pool_strategy == POOL_BALANCE)
 		fputs(",\n\"balance\" : true", fcfg);
 	if (pool_strategy == POOL_LOADBALANCE)
@@ -4750,79 +4986,6 @@ void write_config(FILE *fcfg)
 		fputs(",\n\"round-robin\" : true", fcfg);
 	if (pool_strategy == POOL_ROTATE)
 		fprintf(fcfg, ",\n\"rotate\" : \"%d\"", opt_rotate_period);
-#if defined(unix) || defined(__APPLE__)
-	if (opt_stderr_cmd && *opt_stderr_cmd)
-		fprintf(fcfg, ",\n\"monitor\" : \"%s\"", json_escape(opt_stderr_cmd));
-#endif // defined(unix)
-	if (opt_kernel_path && *opt_kernel_path) {
-		char *kpath = strdup(opt_kernel_path);
-		if (kpath[strlen(kpath)-1] == '/')
-			kpath[strlen(kpath)-1] = 0;
-		fprintf(fcfg, ",\n\"kernel-path\" : \"%s\"", json_escape(kpath));
-	}
-	if (schedstart.enable)
-		fprintf(fcfg, ",\n\"sched-time\" : \"%d:%d\"", schedstart.tm.tm_hour, schedstart.tm.tm_min);
-	if (schedstop.enable)
-		fprintf(fcfg, ",\n\"stop-time\" : \"%d:%d\"", schedstop.tm.tm_hour, schedstop.tm.tm_min);
-	if (opt_socks_proxy && *opt_socks_proxy)
-		fprintf(fcfg, ",\n\"socks-proxy\" : \"%s\"", json_escape(opt_socks_proxy));
-	if (opt_devs_enabled) {
-		fprintf(fcfg, ",\n\"device\" : \"");
-		bool extra_devs = false;
-
-		for (i = 0; i < MAX_DEVICES; i++) {
-			if (devices_enabled[i]) {
-				int startd = i;
-
-				if (extra_devs)
-					fprintf(fcfg, ",");
-				while (i < MAX_DEVICES && devices_enabled[i + 1])
-					++i;
-				fprintf(fcfg, "%d", startd);
-				if (i > startd)
-					fprintf(fcfg, "-%d", i);
-			}
-		}
-		fprintf(fcfg, "\"");
-	}
-	if (opt_removedisabled)
-		fprintf(fcfg, ",\n\"remove-disabled\" : true");
-	if (opt_api_allow)
-		fprintf(fcfg, ",\n\"api-allow\" : \"%s\"", json_escape(opt_api_allow));
-	if (strcmp(opt_api_mcast_addr, API_MCAST_ADDR) != 0)
-		fprintf(fcfg, ",\n\"api-mcast-addr\" : \"%s\"", json_escape(opt_api_mcast_addr));
-	if (strcmp(opt_api_mcast_code, API_MCAST_CODE) != 0)
-		fprintf(fcfg, ",\n\"api-mcast-code\" : \"%s\"", json_escape(opt_api_mcast_code));
-	if (*opt_api_mcast_des)
-		fprintf(fcfg, ",\n\"api-mcast-des\" : \"%s\"", json_escape(opt_api_mcast_des));
-	if (strcmp(opt_api_description, PACKAGE_STRING) != 0)
-		fprintf(fcfg, ",\n\"api-description\" : \"%s\"", json_escape(opt_api_description));
-	if (opt_api_groups)
-		fprintf(fcfg, ",\n\"api-groups\" : \"%s\"", json_escape(opt_api_groups));
-#ifdef USE_ICARUS
-	if (opt_icarus_options)
-		fprintf(fcfg, ",\n\"icarus-options\" : \"%s\"", json_escape(opt_icarus_options));
-	if (opt_icarus_timing)
-		fprintf(fcfg, ",\n\"icarus-timing\" : \"%s\"", json_escape(opt_icarus_timing));
-#endif
-#ifdef USE_KLONDIKE
-	if (opt_klondike_options)
-		fprintf(fcfg, ",\n\"klondike-options\" : \"%s\"", json_escape(opt_klondike_options));
-#endif
-#ifdef USE_DRILLBIT
-        if (opt_drillbit_options)
-                fprintf(fcfg, ",\n\"drillbit-options\" : \"%s\"", json_escape(opt_drillbit_options));
-#endif
-	if (opt_bab_options)
-		fprintf(fcfg, ",\n\"bab-options\" : \"%s\"", json_escape(opt_bab_options));
-#ifdef USE_BITMINE_A1
-	if (opt_bitmine_a1_options)
-		fprintf(fcfg, ",\n\"bitmine-a1-options\" : \"%s\"", json_escape(opt_bitmine_a1_options));
-#endif
-#ifdef USE_USBUTILS
-	if (opt_usb_select)
-		fprintf(fcfg, ",\n\"usb\" : \"%s\"", json_escape(opt_usb_select));
-#endif
 	fputs("\n}\n", fcfg);
 
 	json_escape_free();
@@ -4842,12 +5005,19 @@ void zero_bestshare(void)
 	}
 }
 
+static struct timeval tv_hashmeter;
+static time_t hashdisplay_t;
+
 void zero_stats(void)
 {
 	int i;
 
 	cgtime(&total_tv_start);
+	copy_time(&tv_hashmeter, &total_tv_start);
 	total_rolling = 0;
+	rolling1 = 0;
+	rolling5 = 0;
+	rolling15 = 0;
 	total_mhashes_done = 0;
 	total_getworks = 0;
 	total_accepted = 0;
@@ -4887,6 +5057,8 @@ void zero_stats(void)
 
 	for (i = 0; i < total_devices; ++i) {
 		struct cgpu_info *cgpu = get_devices(i);
+
+		copy_time(&cgpu->dev_start_tv, &total_tv_start);
 
 		mutex_lock(&hash_lock);
 		cgpu->total_mhashes = 0;
@@ -5106,7 +5278,10 @@ retry:
 	wlogprint("[N]ormal [C]lear [S]ilent mode (disable all output)\n");
 	wlogprint("[D]ebug:%s\n[P]er-device:%s\n[Q]uiet:%s\n[V]erbose:%s\n"
 		  "[R]PC debug:%s\n[W]orkTime details:%s\nco[M]pact: %s\n"
-		  "[L]og interval:%d\n[Z]ero statistics\n",
+		  "[T]oggle status switching:%s\n"
+		  "w[I]descreen:%s\n"
+		  "[Z]ero statistics\n"
+		  "[L]og interval:%d\n",
 		opt_debug ? "on" : "off",
 	        want_per_device_stats? "on" : "off",
 		opt_quiet ? "on" : "off",
@@ -5114,6 +5289,8 @@ retry:
 		opt_protocol ? "on" : "off",
 		opt_worktime ? "on" : "off",
 		opt_compact ? "on" : "off",
+		switch_status ? "enabled" : "disabled",
+		opt_widescreen ? "enabled" : "disabled",
 		opt_log_interval);
 	wlogprint("Select an option or any other key to return\n");
 	logwin_update();
@@ -5178,6 +5355,12 @@ retry:
 		opt_worktime ^= true;
 		wlogprint("WorkTime details %s\n", opt_worktime ? "enabled" : "disabled");
 		goto retry;
+	} else if (!strncasecmp(&input, "t", 1)) {
+		switch_status ^= true;
+		goto retry;
+	} else if (!strncasecmp(&input, "i", 1)) {
+		opt_widescreen ^= true;
+		goto retry;
 	} else if (!strncasecmp(&input, "z", 1)) {
 		zero_stats();
 		goto retry;
@@ -5235,6 +5418,8 @@ retry:
 			goto retry;
 		}
 		opt_queue = selected;
+		if (opt_queue < max_queue)
+			max_queue = opt_queue;
 		goto retry;
 	} else if  (!strncasecmp(&input, "s", 1)) {
 		selected = curses_int("Set scantime in seconds");
@@ -5573,6 +5758,7 @@ static void thread_reportout(struct thr_info *thr)
 	thr->cgpu->device_last_well = time(NULL);
 }
 
+ 
 #ifdef WIN32
 long long
 llround (double x)
@@ -5591,106 +5777,109 @@ return (long long)tmp;
 }
 #endif
 
-static void hashmeter(int thr_id, struct timeval *diff,
-		      uint64_t hashes_done)
+static void hashmeter(int thr_id, uint64_t hashes_done)
 {
-	struct timeval temp_tv_end, total_diff;
-	double secs;
-	double local_secs;
-	static double local_mhashes_done = 0;
-	double local_mhashes;
 	bool showlog = false;
-	char displayed_hashes[16], displayed_rolling[16];
-	uint64_t dh64, dr64;
-	struct thr_info *thr;
+	double tv_tdiff;
+	time_t now_t;
+	int diff_t;
 
-	local_mhashes = (double)hashes_done / 1000000.0;
-	/* Update the last time this thread reported in */
-	if (thr_id >= 0) {
-		thr = get_thread(thr_id);
-		cgtime(&(thr->last));
-		thr->cgpu->device_last_well = time(NULL);
+	cgtime(&total_tv_end);
+	tv_tdiff = tdiff(&total_tv_end, &tv_hashmeter);
+	now_t = total_tv_end.tv_sec;
+	diff_t = now_t - hashdisplay_t;
+	if (diff_t >= opt_log_interval) {
+		alt_status ^= switch_status;
+		hashdisplay_t = now_t;
+		showlog = true;
+	} else if (thr_id < 0) {
+		/* hashmeter is called by non-mining threads in case nothing
+		 * has reported in to allow hashrate to converge to zero , but
+		 * we only update if it has been more than opt_log_interval */
+		return;
 	}
+	copy_time(&tv_hashmeter, &total_tv_end);
 
-	secs = (double)diff->tv_sec + ((double)diff->tv_usec / 1000000.0);
-
-	/* So we can call hashmeter from a non worker thread */
 	if (thr_id >= 0) {
+		struct thr_info *thr = get_thread(thr_id);
 		struct cgpu_info *cgpu = thr->cgpu;
-		double thread_rolling = 0.0;
-		int i;
+		double device_tdiff, thr_mhs;
 
-		applog(LOG_DEBUG, "[thread %d: %"PRIu64" hashes, %.1f khash/sec]",
-			thr_id, hashes_done, hashes_done / 1000 / secs);
-
-		/* Rolling average for each thread and each device */
-		decay_time(&thr->rolling, local_mhashes / secs, secs);
-		for (i = 0; i < cgpu->threads; i++)
-			thread_rolling += cgpu->thr[i]->rolling;
+		/* Update the last time this thread reported in */
+		copy_time(&thr->last, &total_tv_end);
+		cgpu->device_last_well = now_t;
+		device_tdiff = tdiff(&total_tv_end, &cgpu->last_message_tv);
+		copy_time(&cgpu->last_message_tv, &total_tv_end);
+		thr_mhs = (double)hashes_done / device_tdiff / 1000000;
+		applog(LOG_DEBUG, "[thread %d: %"PRIu64" hashes, %.1f mhash/sec]",
+		       thr_id, hashes_done, thr_mhs);
+		hashes_done /= 1000000;
 
 		mutex_lock(&hash_lock);
-		decay_time(&cgpu->rolling, thread_rolling, secs);
-		cgpu->total_mhashes += local_mhashes;
+		cgpu->total_mhashes += hashes_done;
+		decay_time(&cgpu->rolling, hashes_done, device_tdiff, opt_log_interval);
+		decay_time(&cgpu->rolling1, hashes_done, device_tdiff, 60.0);
+		decay_time(&cgpu->rolling5, hashes_done, device_tdiff, 300.0);
+		decay_time(&cgpu->rolling15, hashes_done, device_tdiff, 900.0);
 		mutex_unlock(&hash_lock);
 
-		// If needed, output detailed, per-device stats
-		if (want_per_device_stats) {
-			struct timeval now;
-			struct timeval elapsed;
+		if (want_per_device_stats && showlog) {
+			char logline[256];
 
-			cgtime(&now);
-			timersub(&now, &thr->cgpu->last_message_tv, &elapsed);
-			if (opt_log_interval <= elapsed.tv_sec) {
-				struct cgpu_info *cgpu = thr->cgpu;
-				char logline[255];
-
-				cgpu->last_message_tv = now;
-
-				get_statline(logline, sizeof(logline), cgpu);
-				if (!curses_active) {
-					printf("%s          \r", logline);
-					fflush(stdout);
-				} else
-					applog(LOG_INFO, "%s", logline);
-			}
+			get_statline(logline, sizeof(logline), cgpu);
+			if (!curses_active) {
+				printf("%s          \r", logline);
+				fflush(stdout);
+			} else
+				applog(LOG_INFO, "%s", logline);
 		}
+	} else {
+		/* No device has reported in, we have been called from the
+		 * watchdog thread so decay all the hashrates */
+		mutex_lock(&hash_lock);
+		for (thr_id = 0; thr_id < mining_threads; thr_id++) {
+			struct thr_info *thr = get_thread(thr_id);
+			struct cgpu_info *cgpu = thr->cgpu;
+			double device_tdiff  = tdiff(&total_tv_end, &cgpu->last_message_tv);
+
+			copy_time(&cgpu->last_message_tv, &total_tv_end);
+			decay_time(&cgpu->rolling, 0, device_tdiff, opt_log_interval);
+			decay_time(&cgpu->rolling1, 0, device_tdiff, 60.0);
+			decay_time(&cgpu->rolling5, 0, device_tdiff, 300.0);
+			decay_time(&cgpu->rolling15, 0, device_tdiff, 900.0);
+		}
+		mutex_unlock(&hash_lock);
 	}
 
-	/* Totals are updated by all threads so can race without locking */
 	mutex_lock(&hash_lock);
-	cgtime(&temp_tv_end);
-	timersub(&temp_tv_end, &total_tv_end, &total_diff);
-
-	total_mhashes_done += local_mhashes;
-	local_mhashes_done += local_mhashes;
-	/* Only update with opt_log_interval */
-	if (total_diff.tv_sec < opt_log_interval)
-		goto out_unlock;
-	showlog = true;
-	cgtime(&total_tv_end);
-
-	local_secs = (double)total_diff.tv_sec + ((double)total_diff.tv_usec / 1000000.0);
-	decay_time(&total_rolling, local_mhashes_done / local_secs, local_secs);
+	total_mhashes_done += hashes_done;
+	decay_time(&total_rolling, hashes_done, tv_tdiff, opt_log_interval);
+	decay_time(&rolling1, hashes_done, tv_tdiff, 60.0);
+	decay_time(&rolling5, hashes_done, tv_tdiff, 300.0);
+	decay_time(&rolling15, hashes_done, tv_tdiff, 900.0);
 	global_hashrate = llround(total_rolling) * 1000000;
+	total_secs = tdiff(&total_tv_end, &total_tv_start);
+	if (showlog) {
+		char displayed_hashes[16], displayed_rolling[16];
+		char displayed_r1[16], displayed_r5[16], displayed_r15[16];
+		uint64_t d64;
 
-	timersub(&total_tv_end, &total_tv_start, &total_diff);
-	total_secs = (double)total_diff.tv_sec +
-		((double)total_diff.tv_usec / 1000000.0);
+		d64 = (double)total_mhashes_done / total_secs * 1000000ull;
+		suffix_string(d64, displayed_hashes, sizeof(displayed_hashes), 4);
+		d64 = (double)total_rolling * 1000000ull;
+		suffix_string(d64, displayed_rolling, sizeof(displayed_rolling), 4);
+		d64 = (double)rolling1 * 1000000ull;
+		suffix_string(d64, displayed_r1, sizeof(displayed_rolling), 4);
+		d64 = (double)rolling5 * 1000000ull;
+		suffix_string(d64, displayed_r5, sizeof(displayed_rolling), 4);
+		d64 = (double)rolling15 * 1000000ull;
+		suffix_string(d64, displayed_r15, sizeof(displayed_rolling), 4);
 
-	dh64 = (double)total_mhashes_done / total_secs * 1000000ull;
-	dr64 = (double)total_rolling * 1000000ull;
-	suffix_string(dh64, displayed_hashes, sizeof(displayed_hashes), 4);
-	suffix_string(dr64, displayed_rolling, sizeof(displayed_rolling), 4);
-
-	snprintf(statusline, sizeof(statusline),
-		"%s(%ds):%s (avg):%sh/s | A:%.0f  R:%.0f  HW:%d  WU:%.1f/m",
-		want_per_device_stats ? "ALL " : "",
-		opt_log_interval, displayed_rolling, displayed_hashes,
-		total_diff_accepted, total_diff_rejected, hw_errors,
-		total_diff1 / total_secs * 60);
-
-	local_mhashes_done = 0;
-out_unlock:
+		snprintf(statusline, sizeof(statusline),
+			"(%ds):%s (1m):%s (5m):%s (15m):%s (avg):%sh/s",
+			opt_log_interval, displayed_rolling, displayed_r1, displayed_r5,
+			displayed_r15, displayed_hashes);
+	}
 	mutex_unlock(&hash_lock);
 
 	if (showlog) {
@@ -5770,7 +5959,7 @@ static bool parse_stratum_response(struct pool *pool, char *s)
 		/* Since the share is untracked, we can only guess at what the
 		 * work difficulty is based on the current pool diff. */
 		cg_rlock(&pool->data_lock);
-		pool_diff = pool->swork.diff;
+		pool_diff = pool->sdiff;
 		cg_runlock(&pool->data_lock);
 
 		if (json_is_true(res_val)) {
@@ -6202,11 +6391,85 @@ static bool stratum_works(struct pool *pool)
 	return true;
 }
 
+#ifdef HAVE_LIBCURL
+static void __setup_gbt_solo(struct pool *pool)
+{
+	cg_wlock(&pool->gbt_lock);
+	memcpy(pool->coinbase, scriptsig_header_bin, 41);
+	pool->coinbase[41 + pool->n1_len + 4 + 1 + 8] = 25;
+	memcpy(pool->coinbase + 41 + pool->n1_len + 4 + 1 + 8 + 1, pool->script_pubkey, 25);
+	cg_wunlock(&pool->gbt_lock);
+}
+
+static bool setup_gbt_solo(CURL *curl, struct pool *pool)
+{
+	char s[256];
+	int uninitialised_var(rolltime);
+	bool ret = false;
+	json_t *val = NULL, *res_val, *valid_val;
+
+	if (!opt_btc_address) {
+		applog(LOG_ERR, "No BTC address specified, unable to mine solo on %s",
+		       pool->rpc_url);
+		goto out;
+	}
+	snprintf(s, 256, "{\"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", opt_btc_address);
+	val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass, s, true,
+			    false, &rolltime, pool, false);
+	if (!val)
+		goto out;
+	res_val = json_object_get(val, "result");
+	if (!res_val)
+		goto out;
+	valid_val = json_object_get(res_val, "isvalid");
+	if (!valid_val)
+		goto out;
+	if (!json_is_true(valid_val)) {
+		applog(LOG_ERR, "Bitcoin address %s is NOT valid", opt_btc_address);
+		goto out;
+	}
+	applog(LOG_NOTICE, "Solo mining to valid address: %s", opt_btc_address);
+	ret = true;
+	address_to_pubkeyhash(pool->script_pubkey, opt_btc_address);
+	hex2bin(scriptsig_header_bin, scriptsig_header, 41);
+	__setup_gbt_solo(pool);
+
+	if (opt_debug) {
+		char *cb = bin2hex(pool->coinbase, pool->coinbase_len);
+
+		applog(LOG_DEBUG, "Pool %d coinbase %s", pool->pool_no, cb);
+		free(cb);
+	}
+	pool->gbt_curl = curl_easy_init();
+	if (unlikely(!pool->gbt_curl))
+		quit(1, "GBT CURL initialisation failed");
+
+out:
+	if (val)
+		json_decref(val);
+	return ret;
+}
+#else
+static bool setup_gbt_solo(CURL __maybe_unused *curl, struct pool __maybe_unused *pool)
+{
+	return false;
+}
+#endif
+
+static void pool_start_lp(struct pool *pool)
+{
+	if (!pool->lp_started) {
+		pool->lp_started = true;
+		if (unlikely(pthread_create(&pool->longpoll_thread, NULL, longpoll_thread, (void *)pool)))
+			quit(1, "Failed to create pool longpoll thread");
+	}
+}
+
 static bool pool_active(struct pool *pool, bool pinging)
 {
 	struct timeval tv_getwork, tv_getwork_reply;
+	json_t *val = NULL;
 	bool ret = false;
-	json_t *val;
 	CURL *curl;
 	int uninitialised_var(rolltime);
 
@@ -6248,7 +6511,7 @@ retry_stratum:
 		val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass,
 				    gbt_req, true, false, &rolltime, pool, false);
 		if (val) {
-			bool append = false, submit = false;
+			bool append = false, submit = false, transactions = false;
 			json_t *res_val, *mutables;
 			int i, mutsize = 0;
 
@@ -6268,6 +6531,8 @@ retry_stratum:
 						append = true;
 					else if (!strncasecmp(mutable, "submit/coinbase", 15))
 						submit = true;
+					else if (!strncasecmp(mutable, "transactions", 12))
+						transactions = true;
 				}
 			}
 			json_decref(val);
@@ -6277,6 +6542,9 @@ retry_stratum:
 			if (append && submit) {
 				pool->has_gbt = true;
 				pool->rpc_req = gbt_req;
+			} else if (transactions) {
+				pool->gbt_solo = true;
+				pool->rpc_req = gbt_solo_req;
 			}
 		}
 		/* Reset this so we can probe fully just after this. It will be
@@ -6285,6 +6553,8 @@ retry_stratum:
 
 		if (pool->has_gbt)
 			applog(LOG_DEBUG, "GBT coinbase + append support found, switching to GBT protocol");
+		else if (pool->gbt_solo)
+			applog(LOG_DEBUG, "GBT coinbase without append found, switching to GBT solo protocol");
 		else
 			applog(LOG_DEBUG, "No GBT coinbase + append support found, using getwork protocol");
 	}
@@ -6312,6 +6582,13 @@ retry_stratum:
 
 		rc = work_decode(pool, work, val);
 		if (rc) {
+			if (pool->gbt_solo) {
+				ret = setup_gbt_solo(curl, pool);
+				if (ret)
+					pool_start_lp(pool);
+				free_work(work);
+				goto out;
+			}
 			applog(LOG_DEBUG, "Successfully retrieved and deciphered work from pool %u %s",
 			       pool->pool_no, pool->rpc_url);
 			work->pool = pool;
@@ -6332,7 +6609,6 @@ retry_stratum:
 			       pool->pool_no, pool->rpc_url);
 			free_work(work);
 		}
-		json_decref(val);
 
 		if (pool->lp_url)
 			goto out;
@@ -6365,11 +6641,7 @@ retry_stratum:
 		} else
 			pool->lp_url = NULL;
 
-		if (!pool->lp_started) {
-			pool->lp_started = true;
-			if (unlikely(pthread_create(&pool->longpoll_thread, NULL, longpoll_thread, (void *)pool)))
-				quit(1, "Failed to create pool longpoll thread");
-		}
+		pool_start_lp(pool);
 	} else {
 		/* If we failed to parse a getwork, this could be a stratum
 		 * url without the prefix stratum+tcp:// so let's check it */
@@ -6383,12 +6655,15 @@ retry_stratum:
 			applog(LOG_WARNING, "Pool %u slow/down or URL or credentials invalid", pool->pool_no);
 	}
 out:
+	if (val)
+		json_decref(val);
 	curl_easy_cleanup(curl);
 	return ret;
 }
 
 static void pool_resus(struct pool *pool)
 {
+	pool->seq_getfails = 0;
 	if (pool_strategy == POOL_FAILOVER && pool->prio < cp_prio())
 		applog(LOG_WARNING, "Pool %d %s alive, testing stability", pool->pool_no, pool->rpc_url);
 	else
@@ -6409,8 +6684,8 @@ static struct work *hash_pop(bool blocking)
 	if (!HASH_COUNT(staged_work)) {
 		/* Increase the queue if we reach zero and we know we can reach
 		 * the maximum we're asking for. */
-		if (work_filled) {
-			opt_queue++;
+		if (work_filled && max_queue < opt_queue) {
+			max_queue++;
 			work_filled = false;
 		}
 		work_emptied = true;
@@ -6569,9 +6844,9 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cg_dwlock(&pool->data_lock);
 
 	/* Generate merkle root */
-	gen_hash(pool->coinbase, merkle_root, pool->swork.cb_len);
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
 	memcpy(merkle_sha, merkle_root, 32);
-	for (i = 0; i < pool->swork.merkles; i++) {
+	for (i = 0; i < pool->merkles; i++) {
 		memcpy(merkle_sha + 32, pool->swork.merkle_bin[i], 32);
 		gen_hash(merkle_sha, merkle_root, 64);
 		memcpy(merkle_sha, merkle_root, 32);
@@ -6581,23 +6856,23 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	flip32(swap32, data32);
 
 	/* Copy the data template from header_bin */
-	memcpy(work->data, pool->header_bin, 128);
-	memcpy(work->data + pool->merkle_offset, merkle_root, 32);
+	memcpy(work->data, pool->header_bin, 112);
+	memcpy(work->data + 36, merkle_root, 32);
 
 	/* Store the stratum work diff to check it still matches the pool's
 	 * stratum diff when submitting shares */
-	work->sdiff = pool->swork.diff;
+	work->sdiff = pool->sdiff;
 
 	/* Copy parameters required for share submission */
 	work->job_id = strdup(pool->swork.job_id);
 	work->nonce1 = strdup(pool->nonce1);
-	work->ntime = strdup(pool->swork.ntime);
+	work->ntime = strdup(pool->ntime);
 	cg_runlock(&pool->data_lock);
 
 	if (opt_debug) {
 		char *header, *merkle_hash;
 
-		header = bin2hex(work->data, 128);
+		header = bin2hex(work->data, 112);
 		merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
 		applog(LOG_DEBUG, "Generated stratum merkle %s", merkle_hash);
 		applog(LOG_DEBUG, "Generated stratum header %s", header);
@@ -6640,7 +6915,7 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	work->pool = pool;
 	work->stratum = true;
 	work->nonce = 0;
-	work->id = total_work++;
+	work->id = total_work_inc();
 	work->longpoll = false;
 	work->getwork_mode = GETWORK_MODE_STRATUM;
 	work->work_block = work_block;
@@ -6650,6 +6925,149 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 
 	cgtime(&work->tv_staged);
 }
+
+#ifdef HAVE_LIBCURL
+static void gen_solo_work(struct pool *pool, struct work *work);
+
+/* Use the one instance of gbt_curl, protecting the bool with the gbt_lock but
+ * avoiding holding the lock once we've set the bool. */
+static void get_gbt_curl(struct pool *pool, int poll)
+{
+	cg_ilock(&pool->gbt_lock);
+	while (pool->gbt_curl_inuse) {
+		cg_uilock(&pool->gbt_lock);
+		cgsleep_ms(poll);
+		cg_ilock(&pool->gbt_lock);
+	}
+	cg_ulock(&pool->gbt_lock);
+	pool->gbt_curl_inuse = true;
+	cg_wunlock(&pool->gbt_lock);
+}
+
+/* No need for locking here */
+static inline void release_gbt_curl(struct pool *pool)
+{
+	pool->gbt_curl_inuse = false;
+}
+
+static void update_gbt_solo(struct pool *pool)
+{
+	struct work *work = make_work();
+	int rolltime;
+	json_t *val;
+
+	get_gbt_curl(pool, 10);
+retry:
+	/* Bitcoind doesn't like many open RPC connections. */
+	curl_easy_setopt(pool->gbt_curl, CURLOPT_FORBID_REUSE, 1);
+	val = json_rpc_call(pool->gbt_curl, pool->rpc_url, pool->rpc_userpass, pool->rpc_req,
+			    true, false, &rolltime, pool, false);
+
+	if (likely(val)) {
+		bool rc = work_decode(pool, work, val);
+
+		if (rc) {
+			__setup_gbt_solo(pool);
+			gen_solo_work(pool, work);
+			stage_work(work);
+		} else
+			free_work(work);
+		json_decref(val);
+	} else {
+		applog(LOG_DEBUG, "Pool %d json_rpc_call failed on get gbt, retrying in 5s",
+		       pool->pool_no);
+		if (++pool->seq_getfails > 5) {
+			pool_died(pool);
+			goto out;
+		}
+		cgsleep_ms(5000);
+		goto retry;
+	}
+out:
+	release_gbt_curl(pool);
+}
+
+static void gen_solo_work(struct pool *pool, struct work *work)
+{
+	unsigned char merkle_root[32], merkle_sha[64];
+	uint32_t *data32, *swap32;
+	struct timeval now;
+	uint64_t nonce2le;
+	int i;
+
+	cgtime(&now);
+	if (now.tv_sec - pool->tv_lastwork.tv_sec > 60)
+		update_gbt_solo(pool);
+
+	cg_wlock(&pool->gbt_lock);
+
+	/* Update coinbase. Always use an LE encoded nonce2 to fill in values
+	 * from left to right and prevent overflow errors with small n2sizes */
+	nonce2le = htole64(pool->nonce2);
+	memcpy(pool->coinbase + pool->nonce2_offset, &nonce2le, pool->n2size);
+	work->nonce2 = pool->nonce2++;
+	work->nonce2_len = pool->n2size;
+	work->gbt_txns = pool->transactions + 1;
+
+	/* Downgrade to a read lock to read off the pool variables */
+	cg_dwlock(&pool->gbt_lock);
+	work->coinbase = bin2hex(pool->coinbase, pool->coinbase_len);
+	/* Generate merkle root */
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
+	memcpy(merkle_sha, merkle_root, 32);
+	for (i = 0; i < pool->merkles; i++) {
+		unsigned char *merkle_bin;
+
+		merkle_bin = pool->merklebin + (i * 32);
+		memcpy(merkle_sha + 32, merkle_bin, 32);
+		gen_hash(merkle_sha, merkle_root, 64);
+		memcpy(merkle_sha, merkle_root, 32);
+	}
+	data32 = (uint32_t *)merkle_sha;
+	swap32 = (uint32_t *)merkle_root;
+	flip32(swap32, data32);
+
+	/* Copy the data template from header_bin */
+	memcpy(work->data, pool->header_bin, 112);
+	memcpy(work->data + 36, merkle_root, 32);
+
+	work->sdiff = pool->sdiff;
+
+	/* Copy parameters required for share submission */
+	work->ntime = strdup(pool->ntime);
+	memcpy(work->target, pool->gbt_target, 32);
+	cg_runlock(&pool->gbt_lock);
+
+	if (opt_debug) {
+		char *header, *merkle_hash;
+
+		header = bin2hex(work->data, 112);
+		merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
+		applog(LOG_DEBUG, "Generated GBT solo merkle %s", merkle_hash);
+		applog(LOG_DEBUG, "Generated GBT solo header %s", header);
+		applog(LOG_DEBUG, "Work nonce2 %"PRIu64" ntime %s", work->nonce2,
+		       work->ntime);
+		free(header);
+		free(merkle_hash);
+	}
+
+	calc_midstate(work);
+
+	local_work++;
+	work->gbt = true;
+	work->pool = pool;
+	work->nonce = 0;
+	work->id = total_work_inc();
+	work->longpoll = false;
+	work->getwork_mode = GETWORK_MODE_SOLO;
+	work->work_block = work_block;
+	/* Nominally allow a driver to ntime roll 60 seconds */
+	work->drv_rolllimit = 60;
+	calc_diff(work, work->sdiff);
+
+	cgtime(&work->tv_staged);
+}
+#endif
 
 /* The time difference in seconds between when this device last got work via
  * get_work() and generated a valid share. */
@@ -6879,7 +7297,7 @@ static void mt_disable(struct thr_info *mythr, const int thr_id,
 		       struct device_drv *drv)
 {
 	applog(LOG_WARNING, "Thread %d being disabled", thr_id);
-	mythr->rolling = mythr->cgpu->rolling = 0;
+	mythr->cgpu->rolling = 0;
 	applog(LOG_DEBUG, "Waiting on sem in miner thread");
 	cgsem_wait(&mythr->sem);
 	applog(LOG_WARNING, "Thread %d being re-enabled", thr_id);
@@ -7006,7 +7424,7 @@ static void hash_sole_work(struct thr_info *mythr)
 			/* Update the hashmeter at most 5 times per second */
 			if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 			    diff.tv_sec >= opt_log_interval) {
-				hashmeter(thr_id, &diff, hashes_done);
+				hashmeter(thr_id, hashes_done);
 				hashes_done = 0;
 				copy_time(&tv_lastupdate, tv_end);
 			}
@@ -7309,7 +7727,7 @@ void hash_queued_work(struct thr_info *mythr)
 		/* Update the hashmeter at most 5 times per second */
 		if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 		    diff.tv_sec >= opt_log_interval) {
-			hashmeter(thr_id, &diff, hashes_done);
+			hashmeter(thr_id, hashes_done);
 			hashes_done = 0;
 			copy_time(&tv_start, &tv_end);
 		}
@@ -7364,7 +7782,7 @@ void hash_driver_work(struct thr_info *mythr)
 		/* Update the hashmeter at most 5 times per second */
 		if ((hashes_done && (diff.tv_sec > 0 || diff.tv_usec > 200000)) ||
 		    diff.tv_sec >= opt_log_interval) {
-			hashmeter(thr_id, &diff, hashes_done);
+			hashmeter(thr_id, hashes_done);
 			hashes_done = 0;
 			copy_time(&tv_start, &tv_end);
 		}
@@ -7400,9 +7818,8 @@ void *miner_thread(void *userdata)
 
 	cgpu->last_device_valid_work = time(NULL);
 	drv->hash_work(mythr);
-out:
 	drv->thread_shutdown(mythr);
-
+out:
 	return NULL;
 }
 
@@ -7473,7 +7890,7 @@ static struct pool *select_longpoll_pool(struct pool *cp)
 {
 	int i;
 
-	if (cp->hdr_path || cp->has_gbt)
+	if (cp->hdr_path || cp->has_gbt || cp->gbt_solo)
 		return cp;
 	for (i = 0; i < total_pools; i++) {
 		struct pool *pool = pools[i];
@@ -7517,12 +7934,6 @@ static void *longpoll_thread(void *userdata)
 	snprintf(threadname, sizeof(threadname), "%d/Longpoll", cp->pool_no);
 	RenameThread(threadname);
 
-	curl = curl_easy_init();
-	if (unlikely(!curl)) {
-		applog(LOG_ERR, "CURL initialisation failed");
-		return NULL;
-	}
-
 retry_pool:
 	pool = select_longpoll_pool(cp);
 	if (!pool) {
@@ -7538,6 +7949,78 @@ retry_pool:
 		       cp->rpc_url, pool->rpc_url);
 		goto out;
 	}
+
+	if (pool->gbt_solo) {
+		applog(LOG_WARNING, "Block change for %s detection via getblockcount polling",
+		       cp->rpc_url);
+		while (42) {
+			json_t *val, *res_val = NULL;
+
+			if (unlikely(pool->removed))
+				return NULL;
+
+			cgtime(&start);
+			wait_lpcurrent(cp);
+			sprintf(lpreq, "{\"id\": 0, \"method\": \"getblockcount\"}\n");
+
+			/* We will be making another call immediately after this
+			 * one to get the height so allow this curl to be reused.*/
+			get_gbt_curl(pool, 500);
+			curl_easy_setopt(pool->gbt_curl, CURLOPT_FORBID_REUSE, 0);
+			val = json_rpc_call(pool->gbt_curl, pool->rpc_url, pool->rpc_userpass, lpreq, true,
+					    false, &rolltime, pool, false);
+			release_gbt_curl(pool);
+
+			if (likely(val))
+				res_val = json_object_get(val, "result");
+			if (likely(res_val)) {
+				int height = json_integer_value(res_val);
+				const char *prev_hash;
+
+				failures = 0;
+				json_decref(val);
+				if (height >= cp->height) {
+					applog(LOG_WARNING, "Block height change to %d detected on pool %d",
+					       height, cp->pool_no);
+					update_gbt_solo(pool);
+					continue;
+				}
+
+				get_gbt_curl(pool, 500);
+				curl_easy_setopt(pool->gbt_curl, CURLOPT_FORBID_REUSE, 1);
+				val = json_rpc_call(pool->gbt_curl, pool->rpc_url, pool->rpc_userpass,
+						    lpreq, true, false, &rolltime, pool, false);
+				release_gbt_curl(pool);
+
+				if (val) {
+					/* Do a comparison on a short stretch of
+					 * the hash to make sure it hasn't changed
+					 * due to mining on an orphan branch. */
+					prev_hash = json_string_value(json_object_get(val, "result"));
+					if (unlikely(prev_hash && strncasecmp(prev_hash + 56, pool->prev_hash, 8))) {
+						applog(LOG_WARNING, "Mining on orphan branch detected, switching!");
+						update_gbt_solo(pool);
+					}
+					json_decref(val);
+				}
+
+				cgsleep_ms(500);
+			} else {
+				if (val)
+					json_decref(val);
+				cgtime(&end);
+				if (end.tv_sec - start.tv_sec > 30)
+					continue;
+				if (failures == 1)
+					applog(LOG_WARNING, "longpoll failed for %s, retrying every 30s", lp_url);
+				cgsleep_ms(30000);
+			}
+		}
+	}
+
+	curl = curl_easy_init();
+	if (unlikely(!curl))
+		quit (1, "Longpoll CURL initialisation failed");
 
 	/* Any longpoll from any pool is enough for this to be true */
 	have_longpoll = true;
@@ -7812,7 +8295,7 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 
 		discard_stale();
 
-		hashmeter(-1, &zero_tv, 0);
+		hashmeter(-1, 0);
 
 #ifdef HAVE_CURSES
 		if (curses_active_locked()) {
@@ -7912,7 +8395,7 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 				cgpu->status = LIFE_WELL;
 				cgpu->device_last_well = time(NULL);
 			} else if (cgpu->status == LIFE_WELL && (now.tv_sec - thr->last.tv_sec > WATCHDOG_SICK_TIME)) {
-				thr->rolling = cgpu->rolling = 0;
+				cgpu->rolling = 0;
 				cgpu->status = LIFE_SICK;
 				applog(LOG_ERR, "%s: Idle for more than 60 seconds, declaring SICK!", dev_str);
 				cgtime(&thr->sick);
@@ -7957,7 +8440,6 @@ void print_summary(void)
 	struct timeval diff;
 	int hours, mins, secs, i;
 	double utility, displayed_hashes, work_util;
-	bool mhash_base = true;
 
 	timersub(&total_tv_end, &total_tv_start, &diff);
 	hours = diff.tv_sec / 3600;
@@ -7973,12 +8455,8 @@ void print_summary(void)
 		applog(LOG_WARNING, "Pool: %s", pools[0]->rpc_url);
 	applog(LOG_WARNING, "Runtime: %d hrs : %d mins : %d secs", hours, mins, secs);
 	displayed_hashes = total_mhashes_done / total_secs;
-	if (displayed_hashes < 1) {
-		displayed_hashes *= 1000;
-		mhash_base = false;
-	}
 
-	applog(LOG_WARNING, "Average hashrate: %.1f %shash/s", displayed_hashes, mhash_base? "Mega" : "Kilo");
+	applog(LOG_WARNING, "Average hashrate: %.1f Mhash/s", displayed_hashes);
 	applog(LOG_WARNING, "Solved blocks: %d", found_blocks);
 	applog(LOG_WARNING, "Best share difficulty: %s", best_share);
 	applog(LOG_WARNING, "Share submissions: %d", total_accepted + total_rejected);
@@ -8495,17 +8973,11 @@ void enable_device(struct cgpu_info *cgpu)
 	devices[cgpu->cgminer_id = cgminer_id_count++] = cgpu;
 	wr_unlock(&devices_lock);
 
-	if (hotplug_mode) {
+	if (hotplug_mode)
 		new_threads += cgpu->threads;
-#ifdef HAVE_CURSES
-		adj_width(mining_threads + new_threads, &dev_width);
-#endif
-	} else {
+	else
 		mining_threads += cgpu->threads;
-#ifdef HAVE_CURSES
-		adj_width(mining_threads, &dev_width);
-#endif
-	}
+
 	rwlock_init(&cgpu->qlock);
 	cgpu->queued_work = NULL;
 }
@@ -8578,8 +9050,7 @@ static void hotplug_process(void)
 		int dev_no = total_devices + i;
 
 		cgpu = devices[dev_no];
-		if (!opt_devs_enabled || (opt_devs_enabled && devices_enabled[dev_no]))
-			enable_device(cgpu);
+		enable_device(cgpu);
 		cgpu->cgminer_stats.getwork_wait_min.tv_sec = MIN_SEC_UNSET;
 		cgpu->rolling = cgpu->total_mhashes = 0;
 	}
@@ -8609,7 +9080,7 @@ static void hotplug_process(void)
 			thr->cgpu = cgpu;
 			thr->device_thread = j;
 
-			if (cgpu->drv->thread_prepare && !cgpu->drv->thread_prepare(thr)) {
+			if (!cgpu->drv->thread_prepare(thr)) {
 				null_device_drv(cgpu->drv);
 				cgpu->deven = DEV_DISABLED;
 				continue;
@@ -8923,23 +9394,8 @@ int main(int argc, char *argv[])
 	}
 
 	mining_threads = 0;
-	if (opt_devs_enabled) {
-		for (i = 0; i < MAX_DEVICES; i++) {
-			if (devices_enabled[i]) {
-				if (i >= total_devices)
-					quit (1, "Command line options set a device that doesn't exist");
-				enable_device(devices[i]);
-			} else if (i < total_devices) {
-				if (!opt_removedisabled)
-					enable_device(devices[i]);
-				devices[i]->deven = DEV_DISABLED;
-			}
-		}
-		total_devices = cgminer_id_count;
-	} else {
-		for (i = 0; i < total_devices; ++i)
-			enable_device(devices[i]);
-	}
+	for (i = 0; i < total_devices; ++i)
+		enable_device(devices[i]);
 
 #ifdef USE_USBUTILS
 	if (!total_devices) {
@@ -9098,6 +9554,7 @@ begin_bench:
 
 	cgtime(&total_tv_start);
 	cgtime(&total_tv_end);
+	cgtime(&tv_hashmeter);
 	get_datestamp(datestamp, sizeof(datestamp), &total_tv_start);
 
 	watchpool_thr_id = 2;
@@ -9147,7 +9604,7 @@ begin_bench:
 
 	/* Once everything is set up, main() becomes the getwork scheduler */
 	while (42) {
-		int ts, max_staged = opt_queue;
+		int ts, max_staged = max_queue;
 		struct pool *pool, *cp;
 		bool lagging = false;
 		struct work *work;
@@ -9170,8 +9627,8 @@ begin_bench:
 
 		/* Wait until hash_pop tells us we need to create more work */
 		if (ts > max_staged) {
-			if (work_emptied) {
-				opt_queue++;
+			if (work_emptied && max_queue < opt_queue) {
+				max_queue++;
 				work_emptied = false;
 			}
 			work_filled = true;
@@ -9184,8 +9641,8 @@ begin_bench:
 			/* Keeps slowly generating work even if it's not being
 			 * used to keep last_getwork incrementing and to see
 			 * if pools are still alive. */
-			if (work_emptied) {
-				opt_queue++;
+			if (work_emptied && max_queue < opt_queue) {
+				max_queue++;
 				work_emptied = false;
 			}
 			work_filled = true;
@@ -9201,8 +9658,8 @@ begin_bench:
 			applog(LOG_WARNING, "Pool %d not providing work fast enough", cp->pool_no);
 			cp->getfail_occasions++;
 			total_go++;
-			if (!pool_localgen(cp))
-				applog(LOG_INFO, "Increasing queue to %d", ++opt_queue);
+			if (!pool_localgen(cp) && max_queue < opt_queue)
+				applog(LOG_INFO, "Increasing queue to %d", ++max_queue);
 		}
 		pool = select_pool(lagging);
 retry:
@@ -9236,6 +9693,22 @@ retry:
 
 #ifdef HAVE_LIBCURL
 		struct curl_ent *ce;
+
+		if (pool->gbt_solo) {
+			while (pool->idle) {
+				struct pool *altpool = select_pool(true);
+
+				cgsleep_ms(5000);
+				if (altpool != pool) {
+					pool = altpool;
+					goto retry;
+				}
+			}
+			gen_solo_work(pool, work);
+			applog(LOG_DEBUG, "Generated GBT SOLO work");
+			stage_work(work);
+			continue;
+		}
 
 		if (pool->has_gbt) {
 			while (pool->idle) {

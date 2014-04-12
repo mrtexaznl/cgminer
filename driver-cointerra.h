@@ -48,6 +48,7 @@
 #define CTA_WORK_NROLL		53
 #define CTA_WORK_DIFFBITS	55
 #define CTA_REQWORK_REQUESTS	3
+#define CTA_CORE_HASHRATES	3
 
 /* Received message types */
 #define CTA_RECV_UNUSED		0
@@ -69,6 +70,7 @@
 #define CTA_SEND_REQUEST	4
 #define CTA_SEND_FMATCH		5
 #define CTA_SEND_IDENTIFY	6
+#define CTA_SEND_COREHASHRATE	7
 
 /* Types of reset in CTA_RESET_TYPE */
 #define CTA_RESET_NONE		0
@@ -194,6 +196,7 @@ struct cointerra_info {
 	uint16_t ipower_voltage;
 	uint16_t power_temps[2];
 
+	bool autovoltage_complete;
 
 	/* Calculated totals based on work done and nonces found */
 	uint64_t hashes;
@@ -201,7 +204,9 @@ struct cointerra_info {
 
 	/* Calculated totals based on shares returned */
 	uint64_t share_hashes;
+	uint64_t tot_core_hashes[CTA_CORES];
 	uint64_t tot_share_hashes;
+	struct timeval core_hash_start;
 	int requested;
 	uint16_t work_id;
 	int no_matching_work;

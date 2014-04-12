@@ -15,6 +15,7 @@
 #ifdef USE_ANT_S1
 
 #include "util.h"
+#include "klist.h"
 
 #define BITMAIN_RESET_FAULT_DECISECONDS 1
 #define BITMAIN_MINER_THREADS 1
@@ -71,6 +72,11 @@
 
 #define BITMAIN_SEND_STATUS_TIME   10 //s
 #define BITMAIN_SEND_FULL_SPACE    128
+
+#define BITMAIN_OVERHEAT_SLEEP_MS_MAX 10000
+#define BITMAIN_OVERHEAT_SLEEP_MS_MIN 200
+#define BITMAIN_OVERHEAT_SLEEP_MS_DEF 600
+#define BITMAIN_OVERHEAT_SLEEP_MS_STEP 200
 
 struct bitmain_txconfig_token {
 	uint8_t token_type;
@@ -165,6 +171,9 @@ struct bitmain_rxnonce_data {
 } __attribute__((packed, aligned(4)));
 
 struct bitmain_info {
+	int queued;
+	int results;
+
 	int baud;
 	int chain_num;
 	int asic_num;
@@ -183,11 +192,11 @@ struct bitmain_info {
 	int temp[BITMAIN_MAX_TEMP_NUM];
 
 	int temp_max;
+	int temp_hi;
 	int temp_avg;
 	int temp_history_count;
 	int temp_history_index;
 	int temp_sum;
-	int temp_old;
 	int fan_pwm;
 
 	int frequency;
@@ -216,10 +225,45 @@ struct bitmain_info {
 	bool reset;
 	bool overheat;
 	bool optimal;
+	int overheat_temp;
+	uint32_t overheat_count;
+	uint32_t overheat_sleep_ms;
+	uint32_t overheat_sleeps;
+	uint32_t overheat_slept;
+	uint64_t overheat_total_sleep;
+	uint32_t overheat_recovers;
+
+	// Work
+	K_LIST *work_list;
+	K_STORE *work_ready;
+
+	uint64_t work_search;
+	uint64_t tot_search;
+	uint64_t min_search;
+	uint64_t max_search;
+
+	uint64_t failed_search;
+	uint64_t tot_failed;
+	uint64_t min_failed;
+	uint64_t max_failed;
 };
 
+// Work
+typedef struct witem {
+	struct work *work;
+	bool clone;
+} WITEM;
+
+#define ALLOC_WITEMS 1024
+/*
+ * The limit doesn't matter since we simply take the tail item
+ * every time, optionally free it, and then put it on the head
+ */
+#define LIMIT_WITEMS 1024
+
+#define DATAW(_item) ((WITEM *)(_item->data))
+
 #define BITMAIN_READ_SIZE 12
-#define BITMAIN_ARRAY_SIZE 2048
 
 #define BTM_GETS_ERROR -1
 #define BTM_GETS_OK 0
